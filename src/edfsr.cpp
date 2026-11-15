@@ -41,6 +41,33 @@ void logf(const char *fmt, ...) {
 
 static bool g_active = true;  // upscaler on (settings overlay / ini "upscaler")
 
+int g_qualityMode = QM_GAME;
+static const char *kQmKeys[QM_COUNT] = {"game", "ultra_quality", "quality", "balanced", "performance", "ultra_performance", "native"};
+static const float kQmScale[QM_COUNT] = {0.f, 1.f / 1.3f, 1.f / 1.5f, 1.f / 1.7f, 0.5f, 1.f / 3.f, 1.f};
+const char *quality_mode_key(int m) { return (m >= 0 && m < QM_COUNT) ? kQmKeys[m] : "game"; }
+float quality_mode_scale(int m) { return (m > 0 && m < QM_COUNT) ? kQmScale[m] : 0.f; }
+
+// Rewrite <SSAAMultiplier> in the game's custom graphics preset before the game reads it.
+static void apply_quality_mode() {
+    if (g_qualityMode == QM_GAME) return;
+    char la[MAX_PATH]; if (!GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la)) return;
+    char path[MAX_PATH]; snprintf(path, sizeof path, "%s\\Frontier Developments\\Elite Dangerous\\Options\\Graphics\\Custom.4.4.fxcfg", la);
+    FILE *f = fopen(path, "rb"); if (!f) { logf("quality mode: %s not found", path); return; }
+    static char buf[65536]; size_t n = fread(buf, 1, sizeof buf - 1, f); fclose(f); buf[n] = 0;
+    char *a = strstr(buf, "<SSAAMultiplier>"), *b = a ? strstr(a, "</SSAAMultiplier>") : 0;
+    if (!a || !b) { logf("quality mode: SSAAMultiplier not found in graphics config"); return; }
+    a += strlen("<SSAAMultiplier>");
+    char val[32]; snprintf(val, sizeof val, "%.6f", quality_mode_scale(g_qualityMode));
+    if ((size_t)(b - a) == strlen(val) && !strncmp(a, val, b - a)) { logf("quality mode %s: SSAAMultiplier already %s", quality_mode_key(g_qualityMode), val); return; }
+    static char out[65536 + 64];
+    size_t pre = a - buf; memcpy(out, buf, pre); size_t vl = strlen(val); memcpy(out + pre, val, vl); strcpy(out + pre + vl, b);
+    { char bak[MAX_PATH + 16]; snprintf(bak, sizeof bak, "%s.edfsr-backup", path);
+      if (GetFileAttributesA(bak) == INVALID_FILE_ATTRIBUTES) { FILE *k = fopen(bak, "wb"); if (k) { fwrite(buf, 1, n, k); fclose(k); logf("graphics config backup: %s", bak); } } }
+    f = fopen(path, "wb"); if (!f) { logf("quality mode: cannot write graphics config"); return; }
+    fwrite(out, 1, strlen(out), f); fclose(f);
+    logf("quality mode %s: SSAAMultiplier set to %s", quality_mode_key(g_qualityMode), val);
+}
+
 static float ini_float(const char *ini, const char *key, float def) {
     char b[64], d[64]; snprintf(d, sizeof d, "%g", def);
     GetPrivateProfileStringA("edfsr", key, d, b, sizeof b, ini); return (float)atof(b);
@@ -58,6 +85,8 @@ static void load_config() {
     g_fsrCfg.jitterSignY = ini_float(ini, "jitter_sign_y", g_fsrCfg.jitterSignY);
     g_fsrCfg.cockpitDepth = ini_float(ini, "cockpit_depth", g_fsrCfg.cockpitDepth);
     g_fsrCfg.sharpness = ini_float(ini, "sharpness", g_fsrCfg.sharpness);
+    { char q[32]; GetPrivateProfileStringA("edfsr", "quality_mode", "game", q, sizeof q, ini);
+      for (int i = 0; i < QM_COUNT; i++) if (!_stricmp(q, kQmKeys[i])) g_qualityMode = i; }
     g_fsrCfg.reactive = GetPrivateProfileIntA("edfsr", "reactive_mask", g_fsrCfg.reactive, ini);
     g_fsrCfg.reactiveScale = ini_float(ini, "reactive_scale", g_fsrCfg.reactiveScale);
     parse_triggers(ini);
@@ -254,7 +283,9 @@ static std::unordered_set<uint64_t> g_trigHashes;
 static std::unordered_set<void *> g_trigShaders;   // shader objects matching a trigger hash
 
 static void parse_triggers(const char *ini) {
-    char b[1024]; GetPrivateProfileStringA("edfsr", "reactive_trigger", "", b, sizeof b, ini);
+    // default: first transparent-geometry VS/PS after sky+stars (found by frame analysis, see docs)
+    char b[1024]; GetPrivateProfileStringA("edfsr", "reactive_trigger", "0xc0d761a5f116efd0,0xfd70c7cd79020885", b, sizeof b, ini);
+    GetEnvironmentVariableA("EDFSR_REACTIVE_TRIGGER", b, sizeof b);
     for (char *t = strtok(b, ", ;"); t; t = strtok(0, ", ;")) g_trigHashes.insert(_strtoui64(t, 0, 0));
 }
 static void maybe_trigger(void *shader, size_t n, const void *bc) {
@@ -497,6 +528,7 @@ static void startup() {
     if (!strstr(exe, "EliteDangerous64.exe") && !strstr(exe, "dx11test.exe")) return;
     load_config();
     logf("---- ED-FSR start in %s (enabled=%d renderdoc=%d jitter=%d mv=%d framegen=%d)", exe, cfg.enabled, cfg.renderdoc, g_fsrCfg.jitter, g_fsrCfg.mv, g_fgCfg.enabled);
+    if (cfg.enabled && strstr(exe, "EliteDangerous64.exe")) apply_quality_mode();
     if (cfg.renderdoc) load_renderdoc();
     HMODULE eos = GetModuleHandleA("EOSSDK-Win64-Shipping.dll");
     if (eos && cfg.renderdoc) {

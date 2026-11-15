@@ -14,6 +14,10 @@ struct UiState {
     bool  jitter, motionVectors;
     float cockpitDepth;      // 0..20
     bool  debugView;
+    bool  reactive;          // reactive mask for HUD / transparents
+    float reactiveScale;     // 0..2
+    int   qualityMode;       // 0 = game setting, 1 ultra quality, 2 quality, 3 balanced, 4 performance, 5 ultra performance, 6 native AA
+    int   qualityModeActive; // mode the game was started with (restart hint when different)
     // read-only info
     unsigned renderW, renderH, outW, outH;
     const char *upscalerName;   // e.g. "FSR 4.1.2" or "FSR1 (game)"

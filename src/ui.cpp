@@ -474,6 +474,16 @@ bool draw_panel(UiState &st, unsigned w, unsigned h) {
         section("SHARPNESS");
         ImGui::SetNextItemWidth(-FLT_MIN);
         if (ImGui::SliderFloat("##sharp", &st.sharpness, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) st.dirty = true;
+        ImGui::TextUnformatted("QUALITY MODE");
+        ImGui::SameLine(160 * g_scale);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        {
+            static const char *kModes[] = {"GAME SETTING", "ULTRA QUALITY (77%)", "QUALITY (67%)", "BALANCED (59%)",
+                                           "PERFORMANCE (50%)", "ULTRA PERFORMANCE (33%)", "NATIVE AA (100%)"};
+            if (ImGui::Combo("##qmode", &st.qualityMode, kModes, 7)) st.dirty = true;
+            if (st.qualityMode != st.qualityModeActive)
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "SAVE AND RESTART THE GAME TO APPLY");
+        }
 
         section("FRAME GENERATION");
         if (ImGui::Checkbox("ENABLE FRAME GENERATION", &st.framegen)) st.dirty = true;
@@ -499,6 +509,11 @@ bool draw_panel(UiState &st, unsigned w, unsigned h) {
             ImGui::SameLine(160 * g_scale);
             ImGui::SetNextItemWidth(-FLT_MIN);
             if (ImGui::SliderFloat("##cockpit", &st.cockpitDepth, 0.0f, 20.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) st.dirty = true;
+            if (ImGui::Checkbox("HUD / TRANSPARENCY MASK", &st.reactive)) st.dirty = true;
+            ImGui::TextUnformatted("MASK STRENGTH");
+            ImGui::SameLine(160 * g_scale);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::SliderFloat("##rscale", &st.reactiveScale, 0.0f, 2.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp)) st.dirty = true;
             if (ImGui::Checkbox("FSR DEBUG VIEW", &st.debugView)) st.dirty = true;
             ImGui::Unindent(8 * g_scale);
         }

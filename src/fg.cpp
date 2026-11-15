@@ -159,6 +159,7 @@ static void barrier(ID3D12Resource *r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_S
 
 // ------------------------------------------------------------------ settings overlay glue
 static UiState g_ui;
+static int *g_uiQualityPending;
 static bool g_uiInit;
 static ID3D11RenderTargetView *g_bbRtv; static ID3D11Texture2D *g_bbRtvTex;
 static LARGE_INTEGER g_lastPresent, g_qpf; static float g_fps;
@@ -174,6 +175,9 @@ static void save_ini() {
     WritePrivateProfileStringA("edfsr", "motion_vectors", g_ui.motionVectors ? "1" : "0", ini);
     snprintf(b, sizeof b, "%.2f", g_ui.cockpitDepth); WritePrivateProfileStringA("edfsr", "cockpit_depth", b, ini);
     WritePrivateProfileStringA("edfsr", "debug_view", g_ui.debugView ? "1" : "0", ini);
+    WritePrivateProfileStringA("edfsr", "reactive_mask", g_ui.reactive ? "1" : "0", ini);
+    WritePrivateProfileStringA("edfsr", "quality_mode", quality_mode_key(g_ui.qualityMode), ini);
+    snprintf(b, sizeof b, "%.2f", g_ui.reactiveScale); WritePrivateProfileStringA("edfsr", "reactive_scale", b, ini);
     logf("settings saved");
 }
 
@@ -211,6 +215,10 @@ static void overlay(IDXGISwapChain *sc) {
     g_ui.framegenAvailable = g_fgSc != 0;
     g_ui.jitter = g_fsrCfg.jitter != 0; g_ui.motionVectors = g_fsrCfg.mv != 0;
     g_ui.cockpitDepth = g_fsrCfg.cockpitDepth; g_ui.debugView = g_fsrCfg.debugView != 0;
+    g_ui.reactive = g_fsrCfg.reactive != 0; g_ui.reactiveScale = g_fsrCfg.reactiveScale;
+    { static int pending = -1; static int started = g_qualityMode;
+      g_ui.qualityModeActive = started; g_ui.qualityMode = pending >= 0 ? pending : started;
+      g_uiQualityPending = &pending; }
     g_ui.renderW = b->rw; g_ui.renderH = b->rh; g_ui.outW = td.Width; g_ui.outH = td.Height;
     if (upOn && !fsr_failed()) snprintf(g_upName, sizeof g_upName, "FSR %s", fsr_provider_name());
     else snprintf(g_upName, sizeof g_upName, "FSR1 (game)");
@@ -262,6 +270,8 @@ static void overlay(IDXGISwapChain *sc) {
         g_fsrCfg.jitter = g_ui.jitter; g_fsrCfg.mv = g_ui.motionVectors;
         g_fsrCfg.cockpitDepth = g_ui.cockpitDepth;
         g_fsrCfg.debugView = g_ui.debugView;
+        g_fsrCfg.reactive = g_ui.reactive; g_fsrCfg.reactiveScale = g_ui.reactiveScale;
+        if (g_uiQualityPending) *g_uiQualityPending = g_ui.qualityMode;
         if (g_fgSc) { if (g_fgActive != g_ui.framegen) logf("FG: %s", g_ui.framegen ? "on" : "off"); g_fgActive = g_ui.framegen; }
         else g_fgCfg.enabled = g_ui.framegen;  // takes effect after restart (when saved)
     }

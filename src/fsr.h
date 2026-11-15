@@ -21,6 +21,12 @@ struct FsrSettings {
 };
 extern FsrSettings g_fsrCfg;
 
+// Upscaling quality mode -> game render scale (ED "SSAAMultiplier"). 0 = keep the game's own setting.
+enum { QM_GAME, QM_ULTRA_QUALITY, QM_QUALITY, QM_BALANCED, QM_PERFORMANCE, QM_ULTRA_PERFORMANCE, QM_NATIVE_AA, QM_COUNT };
+extern int g_qualityMode;                       // from ini "quality_mode", applied at game start
+const char *quality_mode_key(int m);            // ini token
+float quality_mode_scale(int m);                // render scale (0 for QM_GAME)
+
 // Original (unhooked) context functions, filled by the hook layer.
 struct CtxFns {
     void(STDMETHODCALLTYPE *CSSetShader)(ID3D11DeviceContext *, ID3D11ComputeShader *, ID3D11ClassInstance *const *, UINT);
