@@ -29,9 +29,10 @@ the game's HUD.
 |---|-------|--------|
 | 1 | Frame analysis: FSR 1 pass, depth buffer, camera matrices (RenderDoc) | ✅ done |
 | 2 | Framework: `dinput8.dll` proxy, D3D11 hooks, EASU replacement | ✅ done, tested in game |
-| 3 | Temporal upscaling: D3D11→D3D12 bridge, FSR 4 / FSR 3.1, jitter, camera motion vectors | ✅ done, tested in game |
-| 4a | Reactive mask for HUD / transparents | ✅ done |
-| 4b | Motion vectors for moving objects (ships, SRV, NPCs) | ⏳ planned |
+| 3 | Temporal upscaling: D3D11→D3D12 bridge, FSR 4 / FSR 3.1, sub-pixel jitter | ✅ done, tested in game |
+| 3a | Motion vectors: camera motion (own ship movement/rotation, static world; cockpit excluded) | ✅ done, tested in game |
+| 3b | Motion vectors: moving objects (other ships, SRV, NPCs, station doors/pads) | ⏳ planned |
+| 4 | Reactive mask for HUD / transparents (holograms, particles, engine glow) | ✅ done |
 | 5 | FSR Frame Generation via FFX proxy swapchain, live toggle | 🧪 in-game testing |
 | 6 | In-game settings overlay (CTRL+F8), quality modes, saved to ini | ✅ done, tested in game |
 | 7 | GitHub repository, CI builds, Windows installer | ✅ done |
