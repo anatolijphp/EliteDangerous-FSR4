@@ -15,7 +15,7 @@ FSR 4 (ML, RDNA 4) / FSR 3.1 и добавить FSR Frame Generation. Публ�
 | 1 | Карта кадра: FSR1-проход, depth, матрицы камеры (RenderDoc) | ✅ готово, GO |
 | 2 | Каркас: прокси `dinput8.dll`, хуки D3D11, подмена EASU (PoC) | ✅ готово, проверено в игре |
 | 3 | Временной апскейл: мост D3D11→D3D12, FidelityFX FSR 4 / 3.1, jitter, MV камеры | ✅ готово, проверено в игре |
-| 4 | Качество: MV движущихся объектов, reactive mask для HUD | ⏳ не начато |
+| 4 | Качество: reactive mask для HUD/прозрачных (в работе), MV движущихся объектов | 🚧 в работе |
 | 5 | FSR Frame Generation через FFX proxy swapchain | 🧪 работает на стенде, в игре не проверено |
 | 6 | Оверлей настроек (CTRL+F8, стиль ED), сохранение в ini | ✅ работает в игре (SAVE пишет ini) |
 | 7 | Репозиторий и CI (GitHub Actions) | ✅ github.com/anatolijphp/EliteDangerous-FSR4 |
@@ -35,6 +35,17 @@ FSR 4 (ML, RDNA 4) / FSR 3.1 и добавить FSR Frame Generation. Публ�
 - Jitter — субпиксельный сдвиг viewport, пока привязан depth сцены. MV — из depth + viewProj (b1@4320) + позиции
   камеры (b1@4400); пиксели ближе `cockpit_depth` (кабина) = 0.
 - Версия FFX выбирается через `ffxOverrideVersion` (FSR 4 / FSR 3.1), переключается на лету.
+
+### Этап 4 — качество (в работе)
+- Reactive mask: по шейдеру-триггеру (ini `reactive_trigger`, FNV-64 байткода VS/PS) снимается копия HDR-цели в момент
+  конца непрозрачной геометрии; перед апскейлом маска = относительная разница «финальный HDR − снимок» → `reactive` в FFX.
+  Ini: `reactive_mask`, `reactive_scale`. Хеши шейдеров в игре можно выписать с `EDFSR_LOG_SHADERS=1`.
+- MV движущихся объектов: исследуется раскладка буфера объектов t33 (stride 336).
+
+### Важно: не использовать `SwapDeviceContextState`
+- Runtime D3D11 при каждом переключении состояния переписывает слоты vtable immediate-контекста (два набора реализаций),
+  из-за чего хуки CSSetShader/OM/RS слетали каждый кадр и FSR не включался. Оверлей рисуется со стандартным
+  бэкапом состояния ImGui; в `mod_verify_hooks` есть сторож, который перехукивает переписанные слоты.
 
 ### Этап 5 — генерация кадров (`src/fg.cpp`)
 - Хук `CreateDXGIFactory1` → `CreateSwapChain`(10) / `CreateSwapChainForHwnd`(15). Swapchain игры уводится на скрытое
