@@ -482,7 +482,10 @@ bool draw_panel(UiState &st, unsigned w, unsigned h) {
                                            "PERFORMANCE (50%)", "ULTRA PERFORMANCE (33%)", "NATIVE AA (100%)"};
             if (ImGui::Combo("##qmode", &st.qualityMode, kModes, 7)) st.dirty = true;
             if (st.qualityMode != st.qualityModeActive)
+            {
                 ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "SAVE AND RESTART THE GAME TO APPLY");
+                ImGui::TextColored(ImVec4(0.75f, 0.75f, 0.75f, 1.0f), "LIVE: GAME OPTIONS > GRAPHICS > SUPERSAMPLING");
+            }
         }
 
         section("FRAME GENERATION");
