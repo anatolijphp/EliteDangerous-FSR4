@@ -408,6 +408,7 @@ static HRESULT STDMETHODCALLTYPE hResizeTarget(IDXGISwapChain *sc, const DXGI_MO
 static HWND fg_setup(IDXGIFactory *f, IUnknown *dev, HWND hwnd, UINT w, UINT h, DXGI_FORMAT fmt) {
     ID3D11Device *d11 = 0;
     if (!g_fgCfg.enabled || g_fgSc || !dev || FAILED(dev->QueryInterface(__uuidof(ID3D11Device), (void **)&d11))) return 0;
+    mod_hook_device(d11);  // the swapchain's device is the one that renders
     ID3D11DeviceContext *ctx = 0; d11->GetImmediateContext(&ctx);
     bool ok = fsr_bridge_init(d11, ctx);
     rel(ctx); rel(d11);
@@ -448,7 +449,10 @@ static HRESULT STDMETHODCALLTYPE hCreateSC(IDXGIFactory *f, IUnknown *dev, DXGI_
     HWND hid = desc ? fg_setup(f, dev, desc->OutputWindow, desc->BufferDesc.Width, desc->BufferDesc.Height, desc->BufferDesc.Format) : 0;
     if (!hid) {
         HRESULT hr = oCreateSC(f, dev, desc, out);
-        if (SUCCEEDED(hr) && out && *out && desc && !g_gameSc && is_d3d11(dev)) { g_realHwnd = desc->OutputWindow; hook_game_swapchain(*out, desc->BufferDesc.Format, desc->Windowed); }
+        if (SUCCEEDED(hr) && out && *out && desc && !g_gameSc && is_d3d11(dev)) {
+            ID3D11Device *d = 0; dev->QueryInterface(__uuidof(ID3D11Device), (void **)&d); mod_hook_device(d); rel(d);
+            g_realHwnd = desc->OutputWindow; hook_game_swapchain(*out, desc->BufferDesc.Format, desc->Windowed);
+        }
         return hr;
     }
     DXGI_SWAP_CHAIN_DESC d = *desc; d.OutputWindow = hid; d.Windowed = TRUE;

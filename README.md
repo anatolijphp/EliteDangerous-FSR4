@@ -21,6 +21,20 @@ the game's HUD.
   `edfsr.ini`.
 - **Safe fallback.** If anything fails to initialise, the game's original FSR 1 path is used.
 
+## Status
+
+| # | Stage | Status |
+|---|-------|--------|
+| 1 | Frame analysis: FSR 1 pass, depth buffer, camera matrices (RenderDoc) | ✅ done |
+| 2 | Framework: `dinput8.dll` proxy, D3D11 hooks, EASU replacement | ✅ done, tested in game |
+| 3 | Temporal upscaling: D3D11→D3D12 bridge, FSR 4 / FSR 3.1, jitter, camera motion vectors | ✅ done, tested in game |
+| 4 | Quality: motion vectors for moving objects, reactive mask for the HUD | ⏳ planned |
+| 5 | FSR Frame Generation via FFX proxy swapchain | 🧪 works in test harness, in-game testing |
+| 6 | In-game settings overlay (CTRL+F8), saved to ini | ✅ done, tested in game |
+| 7 | GitHub repository and CI builds | ✅ done |
+
+Detailed development notes (in Russian): [`docs/DEV_NOTES.ru.md`](docs/DEV_NOTES.ru.md).
+
 ## Requirements
 
 - Elite Dangerous (Horizons 4.0 / Odyssey client, DirectX 11), Windows 10/11.

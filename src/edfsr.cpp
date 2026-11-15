@@ -235,21 +235,67 @@ enum { DEV_CreateComputeShader = 18,
        CTX_OMSetRenderTargets = 33, CTX_OMSetRenderTargetsAndUAVs = 34, CTX_RSSetViewports = 44,
        CTX_CSSetShaderResources = 67, CTX_CSSetUnorderedAccessViews = 68, CTX_CSSetShader = 69 };
 
-static void install_device_hooks(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
-    static bool done; if (done || !dev) return;
-    ID3D11DeviceContext *ic = ctx; if (!ic) dev->GetImmediateContext(&ic); else ic->AddRef();
-    void *o;
-    if ((o = hook_vt(dev, DEV_CreateComputeShader, (void *)hCreateCS))) oCreateCS = (PFN_CreateCS)o;
-    if ((o = hook_vt(ic, CTX_CSSetShader, (void *)hCSSetShader))) g_o.CSSetShader = (decltype(g_o.CSSetShader))o;
-    if ((o = hook_vt(ic, CTX_CSSetShaderResources, (void *)hCSSetSRV))) g_o.CSSetShaderResources = (decltype(g_o.CSSetShaderResources))o;
-    if ((o = hook_vt(ic, CTX_CSSetUnorderedAccessViews, (void *)hCSSetUAV))) g_o.CSSetUnorderedAccessViews = (decltype(g_o.CSSetUnorderedAccessViews))o;
-    if ((o = hook_vt(ic, CTX_OMSetRenderTargets, (void *)hOMSetRT))) oOMSetRT = (PFN_OMSetRT)o;
-    if ((o = hook_vt(ic, CTX_OMSetRenderTargetsAndUAVs, (void *)hOMSetRTUAV))) oOMSetRTUAV = (PFN_OMSetRTUAV)o;
-    if ((o = hook_vt(ic, CTX_RSSetViewports, (void *)hRSSetVP))) oRSSetVP = (PFN_RSSetVP)o;
-    ic->Release();
-    done = oCreateCS && g_o.CSSetShader && g_o.CSSetShaderResources && g_o.CSSetUnorderedAccessViews && oOMSetRT && oOMSetRTUAV && oRSSetVP;
-    logf("device hooks installed: %s", done ? "ok" : "FAILED");
+// The D3D11 runtime keeps context vtables per device (heap allocated), and the game creates more than one device.
+// Hook every device's immediate context and remember the original function per vtable.
+struct VtOrig { void **vt; void *fn[8]; };
+static VtOrig g_vto[8]; static int g_nvto;
+static std::mutex g_vtMx;
+enum { S_CSSetShader, S_CSSetSRV, S_CSSetUAV, S_OMSetRT, S_OMSetRTUAV, S_RSSetVP, S_COUNT };
+static const int kSlot[S_COUNT] = {CTX_CSSetShader, CTX_CSSetShaderResources, CTX_CSSetUnorderedAccessViews,
+                                   CTX_OMSetRenderTargets, CTX_OMSetRenderTargetsAndUAVs, CTX_RSSetViewports};
+static void *orig_of(void *obj, int s) {
+    void **vt = *(void ***)obj;
+    for (int i = 0; i < g_nvto; i++) if (g_vto[i].vt == vt) return g_vto[i].fn[s];
+    return g_nvto ? g_vto[0].fn[s] : 0;
 }
+// thunks used everywhere instead of single global originals
+static void STDMETHODCALLTYPE oT_CSSetShader(ID3D11DeviceContext *c, ID3D11ComputeShader *s, ID3D11ClassInstance *const *ci, UINT n) {
+    ((decltype(&oT_CSSetShader))orig_of(c, S_CSSetShader))(c, s, ci, n);
+}
+static void STDMETHODCALLTYPE oT_CSSetSRV(ID3D11DeviceContext *c, UINT a, UINT n, ID3D11ShaderResourceView *const *v) {
+    ((decltype(&oT_CSSetSRV))orig_of(c, S_CSSetSRV))(c, a, n, v);
+}
+static void STDMETHODCALLTYPE oT_CSSetUAV(ID3D11DeviceContext *c, UINT a, UINT n, ID3D11UnorderedAccessView *const *v, const UINT *ic) {
+    ((decltype(&oT_CSSetUAV))orig_of(c, S_CSSetUAV))(c, a, n, v, ic);
+}
+static void STDMETHODCALLTYPE oT_OMSetRT(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *r, ID3D11DepthStencilView *d) {
+    ((decltype(&oT_OMSetRT))orig_of(c, S_OMSetRT))(c, n, r, d);
+}
+static void STDMETHODCALLTYPE oT_OMSetRTUAV(ID3D11DeviceContext *c, UINT n, ID3D11RenderTargetView *const *r, ID3D11DepthStencilView *d,
+                                            UINT us, UINT un, ID3D11UnorderedAccessView *const *u, const UINT *ic) {
+    ((decltype(&oT_OMSetRTUAV))orig_of(c, S_OMSetRTUAV))(c, n, r, d, us, un, u, ic);
+}
+static void STDMETHODCALLTYPE oT_RSSetVP(ID3D11DeviceContext *c, UINT n, const D3D11_VIEWPORT *v) {
+    ((decltype(&oT_RSSetVP))orig_of(c, S_RSSetVP))(c, n, v);
+}
+
+static void install_device_hooks(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
+    if (!dev) return;
+    std::lock_guard<std::mutex> lk(g_vtMx);
+    void *o;
+    if ((o = hook_vt(dev, DEV_CreateComputeShader, (void *)hCreateCS)) && !oCreateCS) oCreateCS = (PFN_CreateCS)o;
+    ID3D11DeviceContext *ic = ctx; if (!ic) dev->GetImmediateContext(&ic); else ic->AddRef();
+    void **vt = *(void ***)ic;
+    bool known = false;
+    for (int i = 0; i < g_nvto; i++) if (g_vto[i].vt == vt) known = true;
+    if (!known && g_nvto < 8) {
+        VtOrig &e = g_vto[g_nvto];
+        e.vt = vt;
+        for (int k = 0; k < S_COUNT; k++) e.fn[k] = vt[kSlot[k]];
+        void *hooks[S_COUNT] = {(void *)hCSSetShader, (void *)hCSSetSRV, (void *)hCSSetUAV, (void *)hOMSetRT, (void *)hOMSetRTUAV, (void *)hRSSetVP};
+        bool ok = true;
+        for (int k = 0; k < S_COUNT; k++) if (e.fn[k] == hooks[k]) ok = false;  // should never happen
+        if (ok) {
+            g_nvto++;
+            for (int k = 0; k < S_COUNT; k++) hook_vt(ic, kSlot[k], hooks[k]);
+        }
+        g_o.CSSetShader = oT_CSSetShader; g_o.CSSetShaderResources = oT_CSSetSRV; g_o.CSSetUnorderedAccessViews = oT_CSSetUAV;
+        oOMSetRT = oT_OMSetRT; oOMSetRTUAV = oT_OMSetRTUAV; oRSSetVP = oT_RSSetVP;
+        logf("device %p: context %p vtable %p hooked (#%d)%s", (void *)dev, (void *)ic, (void *)vt, g_nvto, ok ? "" : " FAILED");
+    }
+    ic->Release();
+}
+void mod_hook_device(ID3D11Device *dev) { install_device_hooks(dev, 0); }
 
 typedef HRESULT(WINAPI *PFN_CreateDev)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
 typedef HRESULT(WINAPI *PFN_CreateDevSC)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, const DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);

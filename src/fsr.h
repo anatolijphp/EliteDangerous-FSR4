@@ -62,6 +62,7 @@ void fsr_request_reinit();         // re-create upscaler context (version change
 
 // edfsr.cpp
 bool mod_upscaler_active();
+void mod_hook_device(ID3D11Device *dev);   // hook a device/context (safe to call repeatedly)
 void mod_set_upscaler_active(bool on);
 // fg.cpp
 void fg_on_dinput_created(void *pDirectInput8);
