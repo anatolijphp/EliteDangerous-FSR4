@@ -46,14 +46,38 @@ Detailed development notes (in Russian): [`docs/DEV_NOTES.ru.md`](docs/DEV_NOTES
 
 ## Installation
 
-1. Download the latest build from **Releases**, or the `ed-fsr` artifact of a CI run.
-2. Copy the contents to `D:\ed-fsr\`. The mod currently loads its config and the FidelityFX DLLs from this folder:
-   `D:\ed-fsr\edfsr.ini` and `D:\ed-fsr\bin\*.dll`.
-3. Close the game. Run `install.ps1`, which copies `dinput8.dll` into the game folder. Pass `-GameDir <path>` if your
-   game folder is not `D:\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64`.
-4. Start the game. The "ED-FSR" hint appears in the top-right corner. Press **CTRL+F8** to configure.
+### Installer (recommended)
 
-To uninstall, run `install.ps1 -Uninstall`, or delete `dinput8.dll` from the game folder.
+1. Download `ED-FSR-Setup-<version>.exe` from **Releases**, or the `ed-fsr-installer` artifact of a CI run.
+2. Close the game and run the installer. It detects the game folder (Epic, Steam or the Frontier launcher). Check it
+   or browse to the folder that contains `EliteDangerous64.exe`, e.g.
+   `...\EliteDangerous\Products\elite-dangerous-odyssey-64`.
+3. Start the game. The "ED-FSR" hint appears in the top-right corner. In game: **Upscaling = FSR**, **Borderless
+   window** for frame generation, and press **CTRL+F8** for settings.
+
+If the game folder already has a `dinput8.dll` from another mod, the installer warns you, backs it up as
+`dinput8.dll.edfsr-backup` and restores it on uninstall. Uninstall from **Settings > Apps** ("ED-FSR"). This removes
+`dinput8.dll` and the `edfsr` folder, including settings and logs, and leaves the game's own files alone.
+
+### Manual install
+
+1. Download the `ed-fsr-<version>.zip` from **Releases**, or the `ed-fsr` artifact of a CI run, and unpack it.
+2. Close the game. Run `install.ps1 -GameDir <folder containing EliteDangerous64.exe>`. The default is
+   `D:\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64`. You can also copy the files yourself:
+   `dinput8.dll` and the `edfsr` folder go into the game folder.
+3. Start the game and press **CTRL+F8** to configure.
+
+To uninstall, run `install.ps1 -Uninstall` (with the same `-GameDir`), or delete `dinput8.dll` and the `edfsr` folder
+from the game folder.
+
+### Installed files
+
+| Path (in the game folder) | Contents |
+|---|---|
+| `dinput8.dll` | the mod |
+| `edfsr\edfsr.ini` | settings (also changed from the CTRL+F8 panel) |
+| `edfsr\bin\` | AMD FidelityFX runtime DLLs (loader, upscaler, frame generation) |
+| `edfsr\logs\` | `edfsr.log` |
 
 ## How it works
 
@@ -79,8 +103,9 @@ and `renderdoc_app.h`:
 LLVM_MINGW=... FFX_SDK=... IMGUI_DIR=... RENDERDOC_INC=... sh build.sh   # -> build/dinput8.dll
 ```
 
-GitHub Actions (`.github/workflows/build.yml`) downloads all dependencies and builds on every push. Tags `v*` produce
-a release zip.
+GitHub Actions (`.github/workflows/build.yml`) downloads all dependencies and builds on every push. It produces the `ed-fsr` package and
+the `ed-fsr-installer` artifact (Inno Setup script: `installer/edfsr.iss`). Tags `v*` publish a release with both the
+installer and the zip.
 
 ## Repository layout
 
@@ -88,6 +113,7 @@ a release zip.
 |---|---|
 | `src/` | mod source: hooks (`edfsr.cpp`), FSR bridge (`fsr.cpp`), frame generation (`fg.cpp`), overlay (`ui.cpp`) |
 | `tools/` | RenderDoc analysis scripts, an ED-like D3D11 test harness, helper scripts |
+| `installer/` | Inno Setup 6 script for `ED-FSR-Setup-<version>.exe` |
 | `docs/` | development notes and frame analysis (in Russian) |
 
 ## Credits and licenses

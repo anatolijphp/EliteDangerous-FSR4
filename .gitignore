@@ -18,3 +18,5 @@ tools/harness/out_*
 tools/harness/crop_*
 # Prebuilt helper proxy DLL (built from tools/rdproxy/dinput8.c)
 tools/rdproxy/*.dll
+# Local installer / package output
+dist/

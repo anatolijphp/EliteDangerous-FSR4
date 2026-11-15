@@ -88,16 +88,39 @@ jobs:
       - name: Stage package
         run: |
           set -euo pipefail
-          mkdir -p dist/ed-fsr/bin
-          cp build/dinput8.dll edfsr.ini install.ps1 README.md dist/ed-fsr/
-          cp bin/*.dll dist/ed-fsr/bin/
+          # Package layout = game folder layout: dinput8.dll at the root, mod data in edfsr/
+          mkdir -p dist/ed-fsr/edfsr/bin
+          cp build/dinput8.dll install.ps1 README.md LICENSE dist/ed-fsr/
+          cp edfsr.ini dist/ed-fsr/edfsr/
+          cp bin/*.dll dist/ed-fsr/edfsr/bin/
           ls -lR dist/ed-fsr
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed" }
+          }
+          if ($env:GITHUB_REF -like "refs/tags/v*") { $ver = $env:GITHUB_REF_NAME } else { $ver = "0.0.0-" + $env:GITHUB_SHA.Substring(0, 7) }
+          & $iscc "/DAppVersion=$ver" "/DSrcDir=$PWD\dist\ed-fsr" "/DOutDir=$PWD\dist\installer" installer\edfsr.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          Get-ChildItem dist\installer
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ed-fsr
           path: dist/ed-fsr/
+          if-no-files-found: error
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ed-fsr-installer
+          path: dist/installer/ED-FSR-Setup-*.exe
           if-no-files-found: error
 
       - name: Release (tags only)
@@ -108,4 +131,5 @@ jobs:
           set -euo pipefail
           Z="ed-fsr-$GITHUB_REF_NAME.zip"
           (cd dist/ed-fsr && 7z a -tzip -bso0 "../$Z" .)
-          gh release create "$GITHUB_REF_NAME" "dist/$Z" --title "ED-FSR $GITHUB_REF_NAME" --generate-notes
+          gh release create "$GITHUB_REF_NAME" "dist/$Z" "dist/installer/ED-FSR-Setup-$GITHUB_REF_NAME.exe" \
+            --title "ED-FSR $GITHUB_REF_NAME" --generate-notes
