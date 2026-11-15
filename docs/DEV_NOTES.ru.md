@@ -1,89 +1,80 @@
-# ED-FSR — FSR 3.1 / FSR 4 для Elite Dangerous
+# ED-FSR — заметки разработки
 
-Цель: заменить встроенный FSR 1 (EASU+RCAS, пространственный) на временной апскейлер
-FSR 3.1, а на RDNA 4 — FSR 4 (через драйверную подмену DX12 FidelityFX DLL).
+Цель: заменить встроенный в Elite Dangerous FSR 1 (EASU+RCAS, пространственный) на временной апскейлер
+FSR 4 (ML, RDNA 4) / FSR 3.1 и добавить FSR Frame Generation. Публичное описание — `README.md` (EN).
 
-## Факты (проверено 2026-11-15)
-- Игра: `D:\Epic Games\EliteDangerous\Products\elite-dangerous-odyssey-64\EliteDangerous64.exe`,
-  версия 2026.10.23.334925 (Epic).
-- API: только `d3d11.dll` + `dxgi.dll` (d3d12 не импортируется).
-- Режимы апскейла в exe: `UPSCALINGMODE_NORMAL / FFXFSR / FFXCAS`,
-  множители `MULTIPLIER_FSR_{ULTRA_QUALITY,QUALITY,BALANCED,PERFORMANCE}`, cbuffer `c_ffxConst`.
-- Экранных motion vectors / TAA не найдено (строки `*MotionVector` — flipbook-анимация текстур).
-- GPU: AMD Radeon RX 9070 XT (RDNA 4) → FSR 4 возможен.
+## Факты об игре (проверено 2026-11-15)
+- `EliteDangerous64.exe` (Odyssey, Epic), версия 2026.10.23.334925. API: только `d3d11.dll` (`D3D11CreateDevice`)
+  и `dxgi.dll` (`CreateDXGIFactory1`).
+- Режимы апскейла в exe: `UPSCALINGMODE_NORMAL / FFXFSR / FFXCAS`. TAA и экранных motion vectors в игре нет.
+- Тестовый GPU: RX 9070 XT (RDNA 4) → провайдеры FSR 4.1.2 (апскейл) и FSR FG 4.0.2 (генерация кадров).
 
-## Инструменты (D:\tools)
-- `renderdoc\` — RenderDoc 1.47 portable (подпись проверена)
-- `llvm-mingw-20261020-ucrt-x86_64\` — clang/mingw тулчейн
-- `dxc\` — DirectX Shader Compiler
-- `python\` — Python 3.12
+## Этапы
+| # | Этап | Статус |
+|---|------|--------|
+| 1 | Карта кадра: FSR1-проход, depth, матрицы камеры (RenderDoc) | ✅ готово, GO |
+| 2 | Каркас: прокси `dinput8.dll`, хуки D3D11, подмена EASU (PoC) | ✅ готово, проверено в игре |
+| 3 | Временной апскейл: мост D3D11→D3D12, FidelityFX FSR 4 / 3.1, jitter, MV камеры | ✅ готово, проверено в игре |
+| 4 | Качество: MV движущихся объектов, reactive mask для HUD | ⏳ не начато |
+| 5 | FSR Frame Generation через FFX proxy swapchain | 🧪 работает на стенде, в игре не проверено |
+| 6 | Оверлей настроек (CTRL+F8, стиль ED), сохранение в ini | ✅ работает в игре (SAVE пишет ini) |
+| 7 | Репозиторий и CI (GitHub Actions) | ✅ github.com/anatolijphp/EliteDangerous-FSR4 |
 
-## Структура
-- `docsCAPTURE.ru.md` — инструкция снятия кадров в игре
-- `tools\analyze_capture.py` — анализатор .rdc (запуск внутри qrenderdoc --py)
-- `tools\analyze.ps1` — прогон анализатора по всем `captures\*.rdc`
-- `tools\testapp\` — тестовое DX11-приложение (проверка анализатора)
-- `captures\` — снимки и результаты (`<name>_analysis\summary.txt`, `frame.json`, `img\`)
+### Этап 2 — каркас
+- `dinput8.dll` — прокси системной DirectInput (игра импортирует `DINPUT8.dll`), грузится раньше создания устройства.
+- IAT-хук `D3D11CreateDevice` в exe → vtable-хуки: `CreateComputeShader`(18), `CSSetShader`(69),
+  `CSSetShaderResources`(67), `CSSetUnorderedAccessViews`(68), `OMSetRenderTargets`(33/34), `RSSetViewports`(44).
+- EASU опознаётся по FNV-64 байткода (`0xf4335f6d4ecad949`, 38208 байт).
+- **Dispatch/Draw не хукать**: runtime сам переписывает эти слоты vtable (fast/validated path) — проверено.
 
-## План
-1. **Карта кадра** (идёт): FSR1-проход, depth, матрицы камеры, порядок HUD/постэффектов. Go/no-go.
-2. Каркас: аддон ReShade 6 (или proxy d3d11/dxgi). Проверка совместимости с EDHM.
-3. Подмена FSR1: jitter в проекции, генерация MV из depth+матриц (камера), маски;
-   сначала FSR 2.2 DX11, затем мост DX11→DX12 (shared NT handles + fences) → FSR 3.1 / FSR 4.
-4. MV для движущихся объектов, reactive mask.
-5. (Опц.) Frame Generation; до этого — AFMF 2 драйвера.
-6. Конфиг, hotkey, фолбэк на родной FSR1 при несовпадении хешей.
+### Этап 3 — апскейл (`src/fsr.cpp`)
+- EASU подменяется no-op шейдером; входы t0/u0 ловятся хуками SRV/UAV (игра привязывает их **после** `CSSetShader`;
+  null-отвязки игнорируются). FSR выполняется на следующем `CSSetShader` (RCAS) и пишет в выход EASU.
+- Общие текстуры создаются в D3D11 (`SHARED_NTHANDLE`) и открываются в D3D12 (обратное направление → E_INVALIDARG);
+  синхронизация — общий fence (D3D11 Signal → D3D12 Wait/Signal → D3D11 Wait).
+- Jitter — субпиксельный сдвиг viewport, пока привязан depth сцены. MV — из depth + viewProj (b1@4320) + позиции
+  камеры (b1@4400); пиксели ближе `cockpit_depth` (кабина) = 0.
+- Версия FFX выбирается через `ffxOverrideVersion` (FSR 4 / FSR 3.1), переключается на лету.
 
-## Карта кадра (снимки 2026-11-15, 2560x1440, SSAA 0.67 → рендер 1715x964, AAMode=4 SMAA)
+### Этап 5 — генерация кадров (`src/fg.cpp`)
+- Хук `CreateDXGIFactory1` → `CreateSwapChain`(10) / `CreateSwapChainForHwnd`(15). Swapchain игры уводится на скрытое
+  окно, на настоящем окне — FFX proxy swapchain (D3D12).
+- На `Present`: копия backbuffer → shared → backbuffer прокси; FG prepare (depth, MV, камера b1@3664/4400); Present прокси.
+- Эксклюзивный fullscreen игнорируется — в игре нужен Borderless. Пока открыта панель настроек, FG выключен.
+
+### Этап 6 — оверлей (`src/ui.cpp`, Dear ImGui 1.91.8)
+- Тост при запуске «Press CTRL+F8 to configure FSR». CTRL+F8 / ESC — панель: апскейлер (FSR 4 / FSR 3.1 / FSR1 игры),
+  резкость, FG, advanced (jitter, MV, cockpit depth, debug view), статус, SAVE в `edfsr.ini`.
+- Пока панель открыта, ввод в игру блокируется (WndProc, DirectInput клавиатура/мышь, SetCursorPos/ClipCursor).
+
+## Карта кадра (2560x1440, SSAA 0.67 → рендер 1715x964)
 Конец кадра (одинаков во всех сценах, хеши шейдеров стабильны):
-1. Сцена + **HUD/голограммы кабины рисуются в рендер-разрешении** (до апскейла) в HDR R11G11B10.
-2. Tonemap: PS `2c77020ebfb2210b` → RGBA8 (LDR) 1715x964.
-3. SMAA: edge `a78b0b9294bca536` → weights `c506cba5af0ba614` → blend `7e65d0741cd1fa15`.
-4. **FSR1 EASU: CS `2f7d47465d50053c`**, dispatch 160x90, 1715x964 RGBA8 → 2560x1440 RGBA8.
-5. **FSR1 RCAS: CS `e1d2250284c19f31`**, 2560x1440 → 2560x1440.
-6. Копия в backbuffer (PS `d7dc2158fc97dab9`) + 1 мелкий draw на полном разрешении.
-- **Основной depth**: D32S8_TYPELESS 1715x964 (стабильный ResourceId 4488 в снимках), **reversed-Z, infinite far, near=0.025**.
-- Отдельный depth 2560x1440 D32S8 — только для пост-апскейл draw.
+1. Сцена + **HUD/голограммы кабины в рендер-разрешении** (до апскейла), HDR R11G11B10.
+2. Tonemap PS `2c77020ebfb2210b` → RGBA8 1715x964.
+3. SMAA: `a78b0b9294bca536` → `c506cba5af0ba614` → `7e65d0741cd1fa15`.
+4. **FSR1 EASU** CS `2f7d47465d50053c`: 1715x964 → 2560x1440 (dispatch 160x90, 64 потока, тайл 16x16).
+5. **FSR1 RCAS** CS `e1d2250284c19f31`.
+6. Копия в backbuffer + 1 мелкий draw.
 
-Per-frame cbuffer (VS/PS slot **b1**, 4480 байт), смещения в байтах:
-- `3664` — view rotation 3x3 (row-major), `3728` — view 3x4 с переносом.
-- `3792` — inverse projection в UV-пространстве: `1/sx=0.94259`, `1/sy=0.53021` (FOV v≈56°), строка `0 0 40 0` (=1/near).
-- `4320` — viewProj (camera-relative, column-major), z-столбец 0, w-строка `0 0 0.025 0` (reversed infinite).
-- `656`, `720` — ещё два viewProj с переносом (разный масштаб FOV — вероятно кабина/мир), проверить.
-- Життера нет (проекция центрирована).
+- **Depth сцены**: R32G8X24_TYPELESS (D32S8) в рендер-разрешении, BindFlags DEPTH_STENCIL|SHADER_RESOURCE,
+  **reversed-Z, infinite far, near = 0.025**. Stencil — классы материалов, **не** маска кабины.
+- **Per-frame cbuffer** (VS/PS b1, ≥4480 байт): `3664` — поворот камеры 3x3 (столбцы: right/up/forward),
+  `4320` — viewProj (row-vector, camera-relative), `4400` — позиция камеры.
+  Меш-шейдеры: `clip = mul(float4(pos - cb1[275], 1), cb1[270..273])`, позиции объектов из structured buffer t33.
+- **Отдельной матрицы кабины нет** (смещения 656/720 никто не читает). Звёзды/скайбокс/HUD-голограммы берут матрицу
+  из b0 (64..127) — поэтому jitter сделан сдвигом viewport, а не правкой матрицы.
+- Полноэкранные проходы освещения тоже идут с depth сцены → получают тот же сдвиг jitter (возможный риск артефактов).
 
-Выводы для мода:
-- Входы для FSR: color = вход EASU (LDR, после tonemap+SMAA; лучше брать HDR до tonemap), depth 4488, матрицы из b1.
-- Життер: сдвигать проекцию в b1 (3792/4320/656/720) на субпиксель — нужно найти, откуда VS берут проекцию.
-- MV: камера + отдельно кабина (кабина неподвижна относительно камеры, мир движется) — проверить stencil как маску кабины.
-- HUD в сцене → нужен reactive/transparency mask на draw-вызовы HUD, иначе шлейфы.
-- SMAA при временном апскейле отключать (AAMode).
+## Окружение
+- Инструменты в `D:\tools`: RenderDoc 1.47, llvm-mingw 20261020, FidelityFX SDK 2.4.0, Dear ImGui 1.91.8, Python 3.12.
+- Secure Boot → глобальный хук RenderDoc не работает; снимки делаются с `renderdoc=1` в ini (оверлей Epic при этом
+  блокируется — он падает вместе с RenderDoc). Инструкция: `docs/CAPTURE.ru.md`.
+- Radmin VPN ломает подключение ED к серверу (игра берёт адрес 26.x) — держать выключенным.
 
-## Статус
-- [x] Тулчейн и RenderDoc на D:
-- [x] Анализатор проверен на тестовом DX11 кадре
-- [x] Кадры из игры: captures\station / space / supercruise / galmap .rdc
-- [x] Разбор кадров — **GO**: FSR1-проход, depth и матрицы найдены, смещения в b1 одинаковы во всех 4 сценах
-- [x] Этап 2 (код): `src\edfsr.cpp` → `build\dinput8.dll` (`sh build.sh`), конфиг `edfsr.ini`, лог `logs\edfsr.log`,
-  установка `install.ps1` / `install.ps1 -Uninstall`. Ctrl+F8 — переключение ED-FSR ↔ оригинальный FSR1.
-  Схема: IAT-хук D3D11CreateDevice → vtable-хуки CreateComputeShader(18) и CSSetShader(69);
-  EASU опознаётся по FNV-64 байткода (0xf4335f6d4ecad949, 38208 байт) и подменяется своим CS с той же раскладкой.
-  **Dispatch не хукать**: runtime сам переписывает слот Dispatch в vtable (fast/validated path) — проверено.
-- [x] Этап 2 (проверка в игре): PoC-подмена работает в живой игре (~220 fps, Ctrl+F8 ок)
-- [~] Этап 3: мост FSR (`src\fsr.cpp`): D3D11 → shared textures (создаются в D3D11 с SHARED_NTHANDLE, открываются в D3D12;
-  обратное направление даёт E_INVALIDARG) + shared fence → `ffxDispatch` → обратно. FidelityFX SDK 2.4.0 в
-  `D:\tools\fidelityfx-sdk-2.4.0`, DLL копируются в `D:\ed-fsr\bin`. **На RX 9070 XT провайдер = FSR 4.1.2.**
-  Джиттер: сдвиг viewport пока привязан depth сцены. MV: из depth + viewProj (b1@4320) + camPos (b1@4400), кабина (z<cockpit_depth) = 0.
-  EASU → no-op CS; FSR выполняется на следующем CSSetShader (RCAS) и пишет в выход EASU.
-  Dev-сборки: `OUT=build/dev sh build.sh` (build\dinput8.dll может быть занят тестами).
-- [~] Этап 5: Frame Generation (`src\fg.cpp`), ini `framegen=1`, Ctrl+F9. Хук CreateDXGIFactory1 → factory
-  CreateSwapChain(10)/ForHwnd(15): swapchain игры уводится на скрытое окно, на настоящем окне — FFX proxy swapchain (D3D12).
-  Present: копия backbuffer → shared → backbuffer прокси, FG prepare (depth/MV/камера из b1@3664/4400), Present прокси.
-  Эксклюзивный fullscreen игнорируется — в игре нужен Borderless.
-- [~] Оверлей настроек (`src\ui.cpp`, Dear ImGui, стиль ED): тост при запуске "Press CTRL+F8 to configure FSR",
-  CTRL+F8 — панель (апскейлер FSR4/FSR3.1/игровой FSR1, резкость, FG, advanced, SAVE в edfsr.ini).
-  Старые хоткеи Ctrl+F8/Ctrl+F9 (переключатели) удалены. Present хукается всегда (не только при FG). На RX 9070 XT провайдер FG = 4.0.2 (ML).
-  Тестовый стенд: `tools\harness\dx11test.exe --edswap --show --vsync 600` с EDFSR_FRAMEGEN=1,
-  EDFSR_EASU_FNV=0x8147ea2c8f57b26d, EDFSR_PROXY=D:\ed-fsr\build\dev\dinput8.dll.
-- Нюансы окружения: Secure Boot → глобальный хук RenderDoc не работает; оверлей Epic (EOSOVH) падает с RenderDoc
-  (прокси его блокирует); Radmin VPN ломает подключение к серверу (адрес 26.x).
+## Сборка и тесты
+- `sh build.sh` → `build/dinput8.dll`; dev-сборка `OUT=build/dev sh build.sh`.
+- Стенд: `tools/harness/dx11test.exe --edswap --show --vsync 600` с переменными
+  `EDFSR_PROXY=<path>\dinput8.dll`, `EDFSR_EASU_FNV=0x8147ea2c8f57b26d`, `EDFSR_FRAMEGEN=1`;
+  `EDFSR_UI_OPEN=1` — открыть панель, `EDFSR_UI_DUMP=<file.bmp>` — снимок кадра с оверлеем.
+- Лог мода: `D:\ed-fsr\logs\edfsr.log`.
+- CI: GitHub Actions (`.github/workflows/build.yml`), артефакт `ed-fsr`; теги `v*` → релиз.

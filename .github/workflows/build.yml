@@ -38,7 +38,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_WIN }}
-          key: deps-${{ env.LLVM_MINGW_NAME }}-ffx-${{ env.FFX_TAG }}-imgui-${{ env.IMGUI_TAG }}-rdoc-${{ env.RENDERDOC_TAG }}-v1
+          key: deps-${{ env.LLVM_MINGW_NAME }}-ffx-${{ env.FFX_TAG }}-imgui-${{ env.IMGUI_TAG }}-rdoc-${{ env.RENDERDOC_TAG }}-v2
 
       - name: Download dependencies
         if: steps.cache.outputs.cache-hit != 'true'
@@ -55,13 +55,15 @@ jobs:
           # FidelityFX SDK: headers + signed DX12 runtime DLLs only (sparse, shallow)
           git clone --quiet --depth 1 --branch "$FFX_TAG" --filter=blob:none --sparse \
             https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git ffx
-          git -C ffx sparse-checkout set --no-cone \
+          # MSYS_NO_PATHCONV: Git Bash would rewrite the leading-slash patterns into C:/Program Files/Git/...
+          MSYS_NO_PATHCONV=1 git -C ffx sparse-checkout set --no-cone \
             /Kits/FidelityFX/api/include/ \
             /Kits/FidelityFX/upscalers/include/ \
             /Kits/FidelityFX/framegeneration/include/ \
             /Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll \
             /Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll \
             /Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll
+          ls ffx/Kits/FidelityFX/api/include ffx/Kits/FidelityFX/signedbin   # fail early if the sparse checkout missed
           rm -rf ffx/.git
 
           # Dear ImGui sources
