@@ -15,10 +15,11 @@ FSR 4 (ML, RDNA 4) / FSR 3.1 и добавить FSR Frame Generation. Публ�
 | 1 | Карта кадра: FSR1-проход, depth, матрицы камеры (RenderDoc) | ✅ готово, GO |
 | 2 | Каркас: прокси `dinput8.dll`, хуки D3D11, подмена EASU (PoC) | ✅ готово, проверено в игре |
 | 3 | Временной апскейл: мост D3D11→D3D12, FidelityFX FSR 4 / 3.1, jitter, MV камеры | ✅ готово, проверено в игре |
-| 4 | Качество: reactive mask для HUD/прозрачных (в работе), MV движущихся объектов | 🚧 в работе |
-| 5 | FSR Frame Generation через FFX proxy swapchain | 🧪 работает на стенде, в игре не проверено |
+| 4a | Reactive mask для HUD/прозрачных | ✅ готово |
+| 4b | MV движущихся объектов (корабли, СРВ, NPC) | ⏳ запланировано |
+| 5 | FSR Frame Generation через FFX proxy swapchain, переключение на лету | 🧪 проверяется в игре |
 | 6 | Оверлей настроек (CTRL+F8, стиль ED), сохранение в ini | ✅ работает в игре (SAVE пишет ini) |
-| 7 | Репозиторий и CI (GitHub Actions) | ✅ github.com/anatolijphp/EliteDangerous-FSR4 |
+| 7 | Репозиторий, CI, установщик (Inno Setup) | ✅ github.com/anatolijphp/EliteDangerous-FSR4 |
 
 ### Этап 2 — каркас
 - `dinput8.dll` — прокси системной DirectInput (игра импортирует `DINPUT8.dll`), грузится раньше создания устройства.
