@@ -61,7 +61,7 @@ BridgeState *fsr_state();
 
 // ---- frame generation (fg.cpp)
 void fg_install_factory_hooks(void *factory);   // called with every IDXGIFactory the game creates
-struct FgSettings { int enabled = 0; int debug = 0; };
+struct FgSettings { int enabled = 0; int startOn = 1; int debug = 0; };  // enabled = route presents through the FG swapchain; startOn = FG on at start
 extern FgSettings g_fgCfg;
 
 // upscaler info for UI

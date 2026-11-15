@@ -211,7 +211,7 @@ static void overlay(IDXGISwapChain *sc) {
     g_ui.upscaler = !upOn ? 0 : (g_fsrCfg.version == 2 ? 2 : 1);
     g_ui.fsr4Available = fsr_has_fsr4();
     g_ui.sharpness = g_fsrCfg.sharpness;
-    g_ui.framegen = g_fgSc ? g_fgActive : g_fgCfg.enabled != 0;
+    g_ui.framegen = g_fgSc ? g_fgActive : g_fgCfg.startOn != 0;
     g_ui.framegenAvailable = g_fgSc != 0;
     g_ui.jitter = g_fsrCfg.jitter != 0; g_ui.motionVectors = g_fsrCfg.mv != 0;
     g_ui.cockpitDepth = g_fsrCfg.cockpitDepth; g_ui.debugView = g_fsrCfg.debugView != 0;
@@ -273,7 +273,7 @@ static void overlay(IDXGISwapChain *sc) {
         g_fsrCfg.reactive = g_ui.reactive; g_fsrCfg.reactiveScale = g_ui.reactiveScale;
         if (g_uiQualityPending) *g_uiQualityPending = g_ui.qualityMode;
         if (g_fgSc) { if (g_fgActive != g_ui.framegen) logf("FG: %s", g_ui.framegen ? "on" : "off"); g_fgActive = g_ui.framegen; }
-        else g_fgCfg.enabled = g_ui.framegen;  // takes effect after restart (when saved)
+        else g_fgCfg.startOn = g_ui.framegen;  // no FG swapchain (framegen_swapchain=0): saved for next start
     }
     if (g_ui.saveRequested) save_ini();
     rel(ctx); rel(d11); rel(bb);
@@ -421,6 +421,7 @@ static HRESULT STDMETHODCALLTYPE hResizeTarget(IDXGISwapChain *sc, const DXGI_MO
 static HWND fg_setup(IDXGIFactory *f, IUnknown *dev, HWND hwnd, UINT w, UINT h, DXGI_FORMAT fmt) {
     ID3D11Device *d11 = 0;
     if (!g_fgCfg.enabled || g_fgSc || !dev || FAILED(dev->QueryInterface(__uuidof(ID3D11Device), (void **)&d11))) return 0;
+    g_fgActive = g_fgCfg.startOn != 0;
     mod_hook_device(d11);  // the swapchain's device is the one that renders
     ID3D11DeviceContext *ctx = 0; d11->GetImmediateContext(&ctx);
     bool ok = fsr_bridge_init(d11, ctx);

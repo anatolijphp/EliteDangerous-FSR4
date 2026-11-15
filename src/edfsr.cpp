@@ -110,7 +110,10 @@ static void load_config() {
     parse_triggers(ini);
     { char u[16]; GetPrivateProfileStringA("edfsr", "upscaler", "fsr4", u, sizeof u, ini);
       if (!_stricmp(u, "game")) g_active = false; else g_fsrCfg.version = !_stricmp(u, "fsr31") ? 2 : 1; }
-    g_fgCfg.enabled = GetPrivateProfileIntA("edfsr", "framegen", g_fgCfg.enabled, ini) && cfg.enabled;
+    // the FG proxy swapchain is created whenever framegen_swapchain=1 (default), so FG can be toggled live;
+    // "framegen" is only the initial on/off state
+    g_fgCfg.startOn = GetPrivateProfileIntA("edfsr", "framegen", 1, ini);
+    g_fgCfg.enabled = GetPrivateProfileIntA("edfsr", "framegen_swapchain", 1, ini) && cfg.enabled;
     g_fgCfg.debug = GetPrivateProfileIntA("edfsr", "framegen_debug", g_fgCfg.debug, ini);
     { char e[8]; if (GetEnvironmentVariableA("EDFSR_FRAMEGEN", e, sizeof e)) g_fgCfg.enabled = atoi(e) && cfg.enabled; }
     char buf[64];
