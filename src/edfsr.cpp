@@ -20,7 +20,24 @@
 #include "fsr.h"
 
 // ------------------------------------------------------------------ config / log
-static const char *kRoot = "D:\\ed-fsr";
+// Mod data root (settings, FidelityFX DLLs, logs). Resolution order:
+//   1. env EDFSR_ROOT  2. <folder of dinput8.dll>\edfsr (installer layout)  3. D:\ed-fsr (dev setup)  4. create (2)
+const char *mod_root() {
+    static char root[MAX_PATH];
+    if (root[0]) return root;
+    if (GetEnvironmentVariableA("EDFSR_ROOT", root, sizeof root) && GetFileAttributesA(root) != INVALID_FILE_ATTRIBUTES) return root;
+    char dll[MAX_PATH] = {}; HMODULE self = 0;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)&mod_root, &self);
+    GetModuleFileNameA(self, dll, sizeof dll);
+    char *sl = strrchr(dll, '\\'); if (sl) *sl = 0;
+    char local[MAX_PATH]; snprintf(local, sizeof local, "%s\\edfsr", dll);
+    if (GetFileAttributesA(local) != INVALID_FILE_ATTRIBUTES) snprintf(root, sizeof root, "%s", local);
+    else if (GetFileAttributesA("D:\\ed-fsr\\edfsr.ini") != INVALID_FILE_ATTRIBUTES) snprintf(root, sizeof root, "D:\\ed-fsr");
+    else { snprintf(root, sizeof root, "%s", local); CreateDirectoryA(root, 0); }
+    char logs[MAX_PATH]; snprintf(logs, sizeof logs, "%s\\logs", root); CreateDirectoryA(logs, 0);
+    return root;
+}
+#define kRoot mod_root()
 static struct Config {
     int enabled = 1;
     int renderdoc = 0;
@@ -516,7 +533,9 @@ static void load_renderdoc() {
     auto g = (pRENDERDOC_GetAPI)GetProcAddress(m, "RENDERDOC_GetAPI");
     RENDERDOC_API_1_1_2 *api = 0;
     if (g && g(eRENDERDOC_API_Version_1_1_2, (void **)&api) && api) {
-        api->SetCaptureFilePathTemplate("D:\\ed-fsr\\captures\\ed");
+        char cap[MAX_PATH]; snprintf(cap, sizeof cap, "%s\\captures", kRoot); CreateDirectoryA(cap, 0);
+        strncat(cap, "\\ed", sizeof cap - strlen(cap) - 1);
+        api->SetCaptureFilePathTemplate(cap);
         RENDERDOC_InputButton keys[] = {eRENDERDOC_Key_F12, eRENDERDOC_Key_PrtScrn};
         api->SetCaptureKeys(keys, 2);
         logf("renderdoc loaded");

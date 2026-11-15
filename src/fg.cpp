@@ -166,7 +166,7 @@ static LARGE_INTEGER g_lastPresent, g_qpf; static float g_fps;
 static char g_upName[64];
 
 static void save_ini() {
-    const char *ini = "D:\\ed-fsr\\edfsr.ini"; char b[32];
+    char ini[MAX_PATH]; snprintf(ini, sizeof ini, "%s\\edfsr.ini", mod_root()); char b[32];
     WritePrivateProfileStringA("edfsr", "enabled", "1", ini);
     WritePrivateProfileStringA("edfsr", "upscaler", g_ui.upscaler == 0 ? "game" : g_ui.upscaler == 2 ? "fsr31" : "fsr4", ini);
     snprintf(b, sizeof b, "%.3f", g_ui.sharpness); WritePrivateProfileStringA("edfsr", "sharpness", b, ini);

@@ -41,6 +41,7 @@ void fsr_capture_frame_cb(ID3D11DeviceContext *ctx);  // copy per-frame camera c
 void fsr_jitter(float &x, float &y);       // current jitter in render pixels
 void fsr_reset();                          // drop history (toggle / scene cut)
 void logf(const char *fmt, ...);
+const char *mod_root();                  // data folder: edfsr.ini, bin\, logs\
 
 // ---- shared bridge state (used by frame generation)
 struct ID3D12Device; struct ID3D12CommandQueue; struct ID3D12Fence; struct ID3D12Resource;

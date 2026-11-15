@@ -226,7 +226,11 @@ static bool init_device(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     fevt = CreateEventW(0, FALSE, FALSE, 0);
 
     // FidelityFX loader (resolves effect DLLs from its own folder)
-    ffxDll = LoadLibraryW(L"D:\\ed-fsr\\bin\\amd_fidelityfx_loader_dx12.dll");
+    {   // loader resolves the effect DLLs from its own folder
+        char p[MAX_PATH]; snprintf(p, sizeof p, "%s\\bin\\amd_fidelityfx_loader_dx12.dll", mod_root());
+        ffxDll = LoadLibraryExA(p, 0, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (!ffxDll) logf("FidelityFX loader not found at %s", p);
+    }
     if (!ffxDll) return fail("load amd_fidelityfx_loader_dx12.dll", GetLastError());
     pCreate = (PfnFfxCreateContext)GetProcAddress(ffxDll, "ffxCreateContext");
     pDestroy = (PfnFfxDestroyContext)GetProcAddress(ffxDll, "ffxDestroyContext");
