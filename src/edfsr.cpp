@@ -9,7 +9,7 @@
 //    and copy the per-frame camera cbuffer (VS b1) when the scene pass ends.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <d3d11.h>
+#include <d3d11_3.h>
 #include <d3dcompiler.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -30,7 +30,8 @@ static struct Config {
 
 void logf(const char *fmt, ...) {
     static std::mutex m; std::lock_guard<std::mutex> l(m);
-    char path[MAX_PATH]; snprintf(path, sizeof path, "%s\\logs\\edfsr.log", kRoot);
+    char path[MAX_PATH];
+    if (!GetEnvironmentVariableA("EDFSR_LOG", path, sizeof path)) snprintf(path, sizeof path, "%s\\logs\\edfsr.log", kRoot);
     FILE *f = fopen(path, "a"); if (!f) return;
     SYSTEMTIME t; GetLocalTime(&t);
     fprintf(f, "%02d:%02d:%02d.%03d [%lu] ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, GetCurrentProcessId());
@@ -45,6 +46,7 @@ static float ini_float(const char *ini, const char *key, float def) {
     GetPrivateProfileStringA("edfsr", key, d, b, sizeof b, ini); return (float)atof(b);
 }
 
+static void parse_triggers(const char *ini);
 static void load_config() {
     char ini[MAX_PATH]; snprintf(ini, sizeof ini, "%s\\edfsr.ini", kRoot);
     cfg.enabled = GetPrivateProfileIntA("edfsr", "enabled", cfg.enabled, ini);
@@ -56,6 +58,9 @@ static void load_config() {
     g_fsrCfg.jitterSignY = ini_float(ini, "jitter_sign_y", g_fsrCfg.jitterSignY);
     g_fsrCfg.cockpitDepth = ini_float(ini, "cockpit_depth", g_fsrCfg.cockpitDepth);
     g_fsrCfg.sharpness = ini_float(ini, "sharpness", g_fsrCfg.sharpness);
+    g_fsrCfg.reactive = GetPrivateProfileIntA("edfsr", "reactive_mask", g_fsrCfg.reactive, ini);
+    g_fsrCfg.reactiveScale = ini_float(ini, "reactive_scale", g_fsrCfg.reactiveScale);
+    parse_triggers(ini);
     { char u[16]; GetPrivateProfileStringA("edfsr", "upscaler", "fsr4", u, sizeof u, ini);
       if (!_stricmp(u, "game")) g_active = false; else g_fsrCfg.version = !_stricmp(u, "fsr31") ? 2 : 1; }
     g_fgCfg.enabled = GetPrivateProfileIntA("edfsr", "framegen", g_fgCfg.enabled, ini) && cfg.enabled;
@@ -177,6 +182,7 @@ static bool init_noop(ID3D11DeviceContext *c) {
 bool mod_upscaler_active() { return cfg.enabled && g_active; }
 void mod_set_upscaler_active(bool on) { if (on != g_active) { g_active = on; fsr_reset(); logf("upscaler: %s", on ? "ED-FSR" : "game FSR1"); } }
 
+static bool g_snapDone;
 static void run_fsr_after_easu(ID3D11DeviceContext *c) {
     g_pendingEASU = false;
     ID3D11Texture2D *color = 0, *out = 0;
@@ -185,6 +191,8 @@ static void run_fsr_after_easu(ID3D11DeviceContext *c) {
     if (color && out) {
         FsrFrame f = {c, color, g_sceneDepth, out};
         if (!fsr_run(f)) { static int n; if (n++ < 3) logf("fsr_run returned false"); }
+        g_snapDone = false;
+        { static unsigned long long nf; if ((++nf % 18000) == 0) logf("FSR frames: %llu", nf); }
     }
     if (color) color->Release(); if (out) out->Release();
 }
@@ -195,6 +203,9 @@ static void STDMETHODCALLTYPE hCSSetShader(ID3D11DeviceContext *c, ID3D11Compute
     if (s) { std::lock_guard<std::mutex> l(g_mx); easu = g_easu.count(s) != 0; }
     if (easu) {
         g_frames++;
+        { static void *seen[4]; static int ns; bool k = false; for (int i = 0; i < ns; i++) k |= seen[i] == c;
+          if (!k && ns < 4) { seen[ns++] = c; logf("EASU bound on context %p (%s), fsr_on=%d", (void *)c,
+              c->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE ? "immediate" : "deferred", fsr_on()); } }
         // learn render size from currently bound input (also re-captured by the SRV/UAV hooks)
         ID3D11ShaderResourceView *sv = 0; c->CSGetShaderResources(0, 1, &sv);
         ID3D11UnorderedAccessView *uv = 0; c->CSGetUnorderedAccessViews(0, 1, &uv);
@@ -220,18 +231,74 @@ static void STDMETHODCALLTYPE hCSSetUAV(ID3D11DeviceContext *c, UINT start, UINT
     g_o.CSSetUnorderedAccessViews(c, start, n, v, ic);
 }
 
+static void hook_context(ID3D11DeviceContext *ic, const char *why);
 static HRESULT STDMETHODCALLTYPE hCreateCS(ID3D11Device *d, const void *bc, SIZE_T n, ID3D11ClassLinkage *cl, ID3D11ComputeShader **out) {
     HRESULT hr = oCreateCS(d, bc, n, cl, out);
     if (cfg.easu_size && n == cfg.easu_size) logf("CS of EASU size created: fnv=0x%016llx", (unsigned long long)fnv64(bc, n));
     if (SUCCEEDED(hr) && out && *out && (cfg.easu_fnv == 0 || ((!cfg.easu_size || n == cfg.easu_size) && fnv64(bc, n) == cfg.easu_fnv))) {
-        std::lock_guard<std::mutex> l(g_mx); g_easu.insert(*out);
-        logf("EASU shader detected: %p (%zu bytes)", (void *)*out, (size_t)n);
+        { std::lock_guard<std::mutex> l(g_mx); g_easu.insert(*out); }
+        logf("EASU shader detected: %p (%zu bytes) on device %p", (void *)*out, (size_t)n, (void *)d);
+        ID3D11DeviceContext *ic = 0; d->GetImmediateContext(&ic); hook_context(ic, "EASU created"); if (ic) ic->Release();
     }
     return hr;
 }
 
+
+// ------------------------------------------------------------------ reactive mask trigger
+// VS/PS whose bytecode FNV is listed in ini "reactive_trigger" (comma separated, 0x...) mark the end of opaque
+// rendering: on the first bind per frame the bound HDR render target is snapshotted (see fsr_snapshot_opaque).
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CreateVS)(ID3D11Device *, const void *, SIZE_T, ID3D11ClassLinkage *, ID3D11VertexShader **);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CreatePS)(ID3D11Device *, const void *, SIZE_T, ID3D11ClassLinkage *, ID3D11PixelShader **);
+static PFN_CreateVS oCreateVS; static PFN_CreatePS oCreatePS;
+static std::unordered_set<uint64_t> g_trigHashes;
+static std::unordered_set<void *> g_trigShaders;   // shader objects matching a trigger hash
+
+static void parse_triggers(const char *ini) {
+    char b[1024]; GetPrivateProfileStringA("edfsr", "reactive_trigger", "", b, sizeof b, ini);
+    for (char *t = strtok(b, ", ;"); t; t = strtok(0, ", ;")) g_trigHashes.insert(_strtoui64(t, 0, 0));
+}
+static void maybe_trigger(void *shader, size_t n, const void *bc) {
+    static int logAll = GetEnvironmentVariableA("EDFSR_LOG_SHADERS", 0, 0) ? 1 : 0;
+    if ((g_trigHashes.empty() && !logAll) || !shader) return;
+    uint64_t h = fnv64(bc, n);
+    if (logAll) logf("shader %p size %zu fnv 0x%016llx", shader, n, (unsigned long long)h);
+    if (g_trigHashes.count(h)) { std::lock_guard<std::mutex> l(g_mx); g_trigShaders.insert(shader); logf("reactive trigger shader %p (fnv 0x%016llx)", shader, (unsigned long long)h); }
+}
+static HRESULT STDMETHODCALLTYPE hCreateVS(ID3D11Device *d, const void *bc, SIZE_T n, ID3D11ClassLinkage *cl, ID3D11VertexShader **out) {
+    HRESULT hr = oCreateVS(d, bc, n, cl, out);
+    if (SUCCEEDED(hr) && out && *out) maybe_trigger(*out, n, bc);
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE hCreatePS(ID3D11Device *d, const void *bc, SIZE_T n, ID3D11ClassLinkage *cl, ID3D11PixelShader **out) {
+    HRESULT hr = oCreatePS(d, bc, n, cl, out);
+    if (SUCCEEDED(hr) && out && *out) maybe_trigger(*out, n, bc);
+    return hr;
+}
+static void check_trigger(ID3D11DeviceContext *c, void *shader) {
+    if (g_snapDone || !shader || !g_inScene || !fsr_on() || !g_fsrCfg.reactive) return;
+    bool hit; { std::lock_guard<std::mutex> l(g_mx); hit = g_trigShaders.count(shader) != 0; }
+    if (!hit) return;
+    ID3D11RenderTargetView *rtv = 0; c->OMGetRenderTargets(1, &rtv, 0);
+    if (rtv) {
+        ID3D11Texture2D *t = 0; tex_of_view(rtv, &t);
+        if (t) { fsr_snapshot_opaque(c, t); t->Release(); g_snapDone = true; }
+        rtv->Release();
+    }
+}
+static void STDMETHODCALLTYPE oT_VSSetShader(ID3D11DeviceContext *, ID3D11VertexShader *, ID3D11ClassInstance *const *, UINT);
+static void STDMETHODCALLTYPE oT_PSSetShader(ID3D11DeviceContext *, ID3D11PixelShader *, ID3D11ClassInstance *const *, UINT);
+static void STDMETHODCALLTYPE hVSSetShader(ID3D11DeviceContext *c, ID3D11VertexShader *s, ID3D11ClassInstance *const *ci, UINT n) {
+    oT_VSSetShader(c, s, ci, n);
+    check_trigger(c, s);
+}
+static void STDMETHODCALLTYPE hPSSetShader(ID3D11DeviceContext *c, ID3D11PixelShader *s, ID3D11ClassInstance *const *ci, UINT n) {
+    oT_PSSetShader(c, s, ci, n);
+    check_trigger(c, s);
+}
+
 // vtable indices (d3d11.h order)
-enum { DEV_CreateComputeShader = 18,
+enum { DEV_CreateVertexShader = 12, DEV_CreatePixelShader = 15, DEV_CreateComputeShader = 18, DEV_CreateDeferredContext = 27,
+       CTX_PSSetShader = 9, CTX_VSSetShader = 11,
        CTX_OMSetRenderTargets = 33, CTX_OMSetRenderTargetsAndUAVs = 34, CTX_RSSetViewports = 44,
        CTX_CSSetShaderResources = 67, CTX_CSSetUnorderedAccessViews = 68, CTX_CSSetShader = 69 };
 
@@ -240,9 +307,10 @@ enum { DEV_CreateComputeShader = 18,
 struct VtOrig { void **vt; void *fn[8]; };
 static VtOrig g_vto[8]; static int g_nvto;
 static std::mutex g_vtMx;
-enum { S_CSSetShader, S_CSSetSRV, S_CSSetUAV, S_OMSetRT, S_OMSetRTUAV, S_RSSetVP, S_COUNT };
+enum { S_CSSetShader, S_CSSetSRV, S_CSSetUAV, S_OMSetRT, S_OMSetRTUAV, S_RSSetVP, S_VSSetShader, S_PSSetShader, S_COUNT };
 static const int kSlot[S_COUNT] = {CTX_CSSetShader, CTX_CSSetShaderResources, CTX_CSSetUnorderedAccessViews,
-                                   CTX_OMSetRenderTargets, CTX_OMSetRenderTargetsAndUAVs, CTX_RSSetViewports};
+                                   CTX_OMSetRenderTargets, CTX_OMSetRenderTargetsAndUAVs, CTX_RSSetViewports,
+                                   CTX_VSSetShader, CTX_PSSetShader};
 static void *orig_of(void *obj, int s) {
     void **vt = *(void ***)obj;
     for (int i = 0; i < g_nvto; i++) if (g_vto[i].vt == vt) return g_vto[i].fn[s];
@@ -268,34 +336,98 @@ static void STDMETHODCALLTYPE oT_OMSetRTUAV(ID3D11DeviceContext *c, UINT n, ID3D
 static void STDMETHODCALLTYPE oT_RSSetVP(ID3D11DeviceContext *c, UINT n, const D3D11_VIEWPORT *v) {
     ((decltype(&oT_RSSetVP))orig_of(c, S_RSSetVP))(c, n, v);
 }
+static void STDMETHODCALLTYPE oT_VSSetShader(ID3D11DeviceContext *c, ID3D11VertexShader *s, ID3D11ClassInstance *const *ci, UINT n) {
+    ((decltype(&oT_VSSetShader))orig_of(c, S_VSSetShader))(c, s, ci, n);
+}
+static void STDMETHODCALLTYPE oT_PSSetShader(ID3D11DeviceContext *c, ID3D11PixelShader *s, ID3D11ClassInstance *const *ci, UINT n) {
+    ((decltype(&oT_PSSetShader))orig_of(c, S_PSSetShader))(c, s, ci, n);
+}
+
+static void hook_context(ID3D11DeviceContext *ic, const char *why) {
+    if (!ic) return;
+    std::lock_guard<std::mutex> lk(g_vtMx);
+    void **vt = *(void ***)ic;
+    for (int i = 0; i < g_nvto; i++) if (g_vto[i].vt == vt) return;
+    if (g_nvto >= 8) return;
+    void *hooks[S_COUNT] = {(void *)hCSSetShader, (void *)hCSSetSRV, (void *)hCSSetUAV, (void *)hOMSetRT, (void *)hOMSetRTUAV, (void *)hRSSetVP,
+                            (void *)hVSSetShader, (void *)hPSSetShader};
+    VtOrig &e = g_vto[g_nvto];
+    e.vt = vt;
+    for (int k = 0; k < S_COUNT; k++) {
+        e.fn[k] = vt[kSlot[k]];
+        if (e.fn[k] == hooks[k]) { logf("context %p vtable %p already hooked?!", (void *)ic, (void *)vt); return; }
+    }
+    g_nvto++;
+    for (int k = 0; k < S_COUNT; k++) hook_vt(ic, kSlot[k], hooks[k]);
+    g_o.CSSetShader = oT_CSSetShader; g_o.CSSetShaderResources = oT_CSSetSRV; g_o.CSSetUnorderedAccessViews = oT_CSSetUAV;
+    oOMSetRT = oT_OMSetRT; oOMSetRTUAV = oT_OMSetRTUAV; oRSSetVP = oT_RSSetVP;
+    logf("context %p (%s) vtable %p hooked (#%d) [%s]", (void *)ic,
+         ic->GetType() == D3D11_DEVICE_CONTEXT_IMMEDIATE ? "immediate" : "deferred", (void *)vt, g_nvto, why);
+}
+
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CreateDeferred)(ID3D11Device *, UINT, ID3D11DeviceContext **);
+static PFN_CreateDeferred oCreateDeferred;
+static HRESULT STDMETHODCALLTYPE hCreateDeferred(ID3D11Device *d, UINT f, ID3D11DeviceContext **out) {
+    HRESULT hr = oCreateDeferred(d, f, out);
+    if (SUCCEEDED(hr) && out && *out) hook_context(*out, "deferred context created");
+    return hr;
+}
+
+static PFN_CreateDeferred oCreateDeferred1, oCreateDeferred2, oCreateDeferred3;
+static HRESULT STDMETHODCALLTYPE hCreateDeferred1(ID3D11Device *d, UINT f, ID3D11DeviceContext **out) {
+    HRESULT hr = oCreateDeferred1(d, f, out); if (SUCCEEDED(hr) && out && *out) hook_context(*out, "deferred context1 created"); return hr;
+}
+static HRESULT STDMETHODCALLTYPE hCreateDeferred2(ID3D11Device *d, UINT f, ID3D11DeviceContext **out) {
+    HRESULT hr = oCreateDeferred2(d, f, out); if (SUCCEEDED(hr) && out && *out) hook_context(*out, "deferred context2 created"); return hr;
+}
+static HRESULT STDMETHODCALLTYPE hCreateDeferred3(ID3D11Device *d, UINT f, ID3D11DeviceContext **out) {
+    HRESULT hr = oCreateDeferred3(d, f, out); if (SUCCEEDED(hr) && out && *out) hook_context(*out, "deferred context3 created"); return hr;
+}
 
 static void install_device_hooks(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     if (!dev) return;
-    std::lock_guard<std::mutex> lk(g_vtMx);
     void *o;
-    if ((o = hook_vt(dev, DEV_CreateComputeShader, (void *)hCreateCS)) && !oCreateCS) oCreateCS = (PFN_CreateCS)o;
-    ID3D11DeviceContext *ic = ctx; if (!ic) dev->GetImmediateContext(&ic); else ic->AddRef();
-    void **vt = *(void ***)ic;
-    bool known = false;
-    for (int i = 0; i < g_nvto; i++) if (g_vto[i].vt == vt) known = true;
-    if (!known && g_nvto < 8) {
-        VtOrig &e = g_vto[g_nvto];
-        e.vt = vt;
-        for (int k = 0; k < S_COUNT; k++) e.fn[k] = vt[kSlot[k]];
-        void *hooks[S_COUNT] = {(void *)hCSSetShader, (void *)hCSSetSRV, (void *)hCSSetUAV, (void *)hOMSetRT, (void *)hOMSetRTUAV, (void *)hRSSetVP};
-        bool ok = true;
-        for (int k = 0; k < S_COUNT; k++) if (e.fn[k] == hooks[k]) ok = false;  // should never happen
-        if (ok) {
-            g_nvto++;
-            for (int k = 0; k < S_COUNT; k++) hook_vt(ic, kSlot[k], hooks[k]);
-        }
-        g_o.CSSetShader = oT_CSSetShader; g_o.CSSetShaderResources = oT_CSSetSRV; g_o.CSSetUnorderedAccessViews = oT_CSSetUAV;
-        oOMSetRT = oT_OMSetRT; oOMSetRTUAV = oT_OMSetRTUAV; oRSSetVP = oT_RSSetVP;
-        logf("device %p: context %p vtable %p hooked (#%d)%s", (void *)dev, (void *)ic, (void *)vt, g_nvto, ok ? "" : " FAILED");
+    {
+        std::lock_guard<std::mutex> lk(g_vtMx);
+        if ((o = hook_vt(dev, DEV_CreateComputeShader, (void *)hCreateCS)) && !oCreateCS) oCreateCS = (PFN_CreateCS)o;
+        if ((o = hook_vt(dev, DEV_CreateVertexShader, (void *)hCreateVS)) && !oCreateVS) oCreateVS = (PFN_CreateVS)o;
+        if ((o = hook_vt(dev, DEV_CreatePixelShader, (void *)hCreatePS)) && !oCreatePS) oCreatePS = (PFN_CreatePS)o;
+        if ((o = hook_vt(dev, DEV_CreateDeferredContext, (void *)hCreateDeferred)) && !oCreateDeferred) oCreateDeferred = (PFN_CreateDeferred)o;
+        IUnknown *u = 0;
+        if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D11Device1), (void **)&u))) { u->Release();
+            if ((o = hook_vt(dev, 44, (void *)hCreateDeferred1)) && !oCreateDeferred1) oCreateDeferred1 = (PFN_CreateDeferred)o; }
+        if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D11Device2), (void **)&u))) { u->Release();
+            if ((o = hook_vt(dev, 51, (void *)hCreateDeferred2)) && !oCreateDeferred2) oCreateDeferred2 = (PFN_CreateDeferred)o; }
+        if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D11Device3), (void **)&u))) { u->Release();
+            if ((o = hook_vt(dev, 62, (void *)hCreateDeferred3)) && !oCreateDeferred3) oCreateDeferred3 = (PFN_CreateDeferred)o; }
     }
+    ID3D11DeviceContext *ic = ctx; if (!ic) dev->GetImmediateContext(&ic); else ic->AddRef();
+    hook_context(ic, "immediate");
     ic->Release();
 }
 void mod_hook_device(ID3D11Device *dev) { install_device_hooks(dev, 0); }
+
+// Slot-level watchdog: the runtime may rewrite individual vtable slots (e.g. after SwapDeviceContextState).
+// Re-patch any slot that no longer points to our hook; keep the new value as the original if it is not ours.
+void mod_verify_hooks(ID3D11DeviceContext *ic) {
+    if (!ic) return;
+    std::lock_guard<std::mutex> lk(g_vtMx);
+    void **vt = *(void ***)ic;
+    void *hooks[S_COUNT] = {(void *)hCSSetShader, (void *)hCSSetSRV, (void *)hCSSetUAV, (void *)hOMSetRT, (void *)hOMSetRTUAV, (void *)hRSSetVP,
+                            (void *)hVSSetShader, (void *)hPSSetShader};
+    for (int i = 0; i < g_nvto; i++) {
+        if (g_vto[i].vt != vt) continue;
+        for (int k = 0; k < S_COUNT; k++) {
+            void *cur = vt[kSlot[k]];
+            if (cur == hooks[k]) continue;
+            static int n; if (n++ < 40) logf("vtable %p slot %d was rewritten (%p) -> re-hooked", (void *)vt, kSlot[k], cur);
+            g_vto[i].fn[k] = cur;
+            hook_vt(ic, kSlot[k], hooks[k]);
+        }
+        return;
+    }
+}
+
 
 typedef HRESULT(WINAPI *PFN_CreateDev)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
 typedef HRESULT(WINAPI *PFN_CreateDevSC)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, const DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);

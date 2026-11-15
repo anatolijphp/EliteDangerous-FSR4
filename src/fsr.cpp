@@ -28,7 +28,10 @@ static ID3D12GraphicsCommandList *cl12;
 static ID3D12Fence *fence12; static ID3D11Fence *fence11; static UINT64 fval; static HANDLE fevt;
 
 struct Shared { ID3D12Resource *r12 = 0; ID3D11Texture2D *t11 = 0; ID3D11UnorderedAccessView *uav = 0; };
-static Shared sColor, sDepth, sMV, sOut;
+static Shared sColor, sDepth, sMV, sOut, sReactive;
+static ID3D11Texture2D *snapTex, *snapSrc;           // opaque snapshot copy / the HDR target it was taken from
+static ID3D11ShaderResourceView *snapSrv, *hdrSrv; static ID3D11Texture2D *hdrSrvTex;
+static bool snapValid;
 static UINT rw, rh, dw, dh;  // render / display size
 
 static HMODULE ffxDll;
@@ -71,11 +74,15 @@ static bool fail(const char *what, HRESULT hr = 0) {
 // ------------------------------------------------------------------ prep shader
 static const char *kPrepCS = R"(
 Texture2D<float> depthTex : register(t0);
+Texture2D<float3> hdrFinal : register(t1);
+Texture2D<float3> hdrOpaque : register(t2);
 RWTexture2D<float> outDepth : register(u0);
 RWTexture2D<float2> outMV : register(u1);
+RWTexture2D<float> outReactive : register(u2);
 cbuffer Cur  : register(b0) { float4 cur[276]; };
 cbuffer Prev : register(b1) { float4 prv[276]; };
-cbuffer Params : register(b2) { float2 rsize; float cockpitDepth; float valid; float zNear; float useMV; float2 jitter; };
+cbuffer Params : register(b2) { float2 rsize; float cockpitDepth; float valid; float zNear; float useMV; float2 jitter;
+                                 float useReactive; float reactiveScale; float2 pad2; };
 
 float4x4 inv(float4x4 m) {
     // gluInvertMatrix: layout-agnostic (same layout in and out)
@@ -129,6 +136,15 @@ float4x4 inv(float4x4 m) {
         }
     }
     outMV[id] = mv;
+    float r = 0;
+    if (useReactive > 0) {
+        float3 a = hdrFinal[id], b = hdrOpaque[id];
+        float3 d = abs(a - b);
+        float m = max(d.r, max(d.g, d.b));
+        float l = max(max(a.r, max(a.g, a.b)), 1e-3);
+        r = saturate(reactiveScale * smoothstep(0.02, 0.25, m / l));   // relative change -> transparent/HUD coverage
+    }
+    outReactive[id] = r;
 }
 )";
 
@@ -171,7 +187,7 @@ static void gpu_idle() {
 static void destroy_sized() {
     gpu_idle();
     if (fctx && pDestroy) { pDestroy(&fctx, 0); fctx = 0; }
-    free_shared(sColor); free_shared(sDepth); free_shared(sMV); free_shared(sOut);
+    free_shared(sColor); free_shared(sDepth); free_shared(sMV); free_shared(sOut); free_shared(sReactive);
     rw = rh = dw = dh = 0;
 }
 
@@ -227,7 +243,7 @@ static bool init_device(ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     // NOTE: device CreateComputeShader is hooked; harmless (hash won't match EASU)
     hr = d11->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), 0, &csPrep); b->Release();
     if (FAILED(hr)) return fail("prep CS", hr);
-    D3D11_BUFFER_DESC bd = {32, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
+    D3D11_BUFFER_DESC bd = {48, D3D11_USAGE_DYNAMIC, D3D11_BIND_CONSTANT_BUFFER, D3D11_CPU_ACCESS_WRITE, 0, 0};
     if (FAILED(hr = d11->CreateBuffer(&bd, 0, &cbParams))) return fail("params cb", hr);
     QueryPerformanceFrequency(&qpf);
     logf("FSR bridge device init ok");
@@ -240,6 +256,7 @@ static bool init_sized(UINT nrw, UINT nrh, UINT ndw, UINT ndh) {
     if (!make_shared(rw, rh, DXGI_FORMAT_R8G8B8A8_UNORM, false, sColor, "color")) return false;
     if (!make_shared(rw, rh, DXGI_FORMAT_R32_FLOAT, true, sDepth, "depth")) return false;
     if (!make_shared(rw, rh, DXGI_FORMAT_R16G16_FLOAT, true, sMV, "mv")) return false;
+    if (!make_shared(rw, rh, DXGI_FORMAT_R8_UNORM, true, sReactive, "reactive")) return false;
     if (!make_shared(dw, dh, DXGI_FORMAT_R8G8B8A8_UNORM, false, sOut, "output")) return false;
 
     ffxCreateBackendDX12Desc be = {}; be.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12; be.device = d12;
@@ -376,6 +393,39 @@ BridgeState *fsr_state() {
     return &g_bs;
 }
 
+void fsr_snapshot_opaque(ID3D11DeviceContext *ctx, ID3D11Texture2D *hdr) {
+    if (g_failed || !d11 || !hdr) return;
+    D3D11_TEXTURE2D_DESC d; hdr->GetDesc(&d);
+    if (!(d.BindFlags & D3D11_BIND_SHADER_RESOURCE) || d.SampleDesc.Count != 1) return;
+    if (snapTex) {
+        D3D11_TEXTURE2D_DESC sd; snapTex->GetDesc(&sd);
+        if (sd.Width != d.Width || sd.Height != d.Height || sd.Format != d.Format) { rel(snapSrv); rel(snapTex); }
+    }
+    if (!snapTex) {
+        D3D11_TEXTURE2D_DESC nd = d; nd.BindFlags = D3D11_BIND_SHADER_RESOURCE; nd.MiscFlags = 0; nd.CPUAccessFlags = 0; nd.Usage = D3D11_USAGE_DEFAULT;
+        nd.MipLevels = 1; nd.ArraySize = 1;
+        if (FAILED(d11->CreateTexture2D(&nd, 0, &snapTex))) { logf("snapshot texture failed (fmt %d)", d.Format); return; }
+        D3D11_SHADER_RESOURCE_VIEW_DESC vd = {}; vd.Format = d.Format; vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; vd.Texture2D.MipLevels = 1;
+        if (d.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS) vd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if (d.Format == DXGI_FORMAT_R11G11B10_FLOAT || vd.Format != DXGI_FORMAT_UNKNOWN) d11->CreateShaderResourceView(snapTex, &vd, &snapSrv);
+        logf("reactive snapshot target %ux%u fmt %d", d.Width, d.Height, d.Format);
+    }
+    ctx->CopySubresourceRegion(snapTex, 0, 0, 0, 0, hdr, 0, 0);
+    if (snapSrc != hdr) { if (snapSrc) snapSrc->Release(); snapSrc = hdr; hdr->AddRef(); }
+    snapValid = true;
+}
+
+static ID3D11ShaderResourceView *hdr_srv() {
+    if (!snapSrc) return 0;
+    if (hdrSrvTex == snapSrc && hdrSrv) return hdrSrv;
+    rel(hdrSrv); hdrSrvTex = snapSrc;
+    D3D11_TEXTURE2D_DESC d; snapSrc->GetDesc(&d);
+    D3D11_SHADER_RESOURCE_VIEW_DESC vd = {}; vd.Format = d.Format; vd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; vd.Texture2D.MipLevels = 1;
+    if (d.Format == DXGI_FORMAT_R16G16B16A16_TYPELESS) vd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    d11->CreateShaderResourceView(snapSrc, &vd, &hdrSrv);
+    return hdrSrv;
+}
+
 // ------------------------------------------------------------------ frame
 bool fsr_run(const FsrFrame &f) {
     if (g_failed || !f.color || !f.output) return false;
@@ -399,6 +449,9 @@ bool fsr_run(const FsrFrame &f) {
     int prevIdx = cbCur ^ 1;
     bool valid = cbHave[cbCur] && cbHave[prevIdx];
     ID3D11ShaderResourceView *dsrv = depth_srv(f.depth);
+    ID3D11ShaderResourceView *hsrv = (snapValid && g_fsrCfg.reactive) ? hdr_srv() : 0;
+    bool useReact = hsrv && snapSrv;
+    { static bool logged; if (useReact && !logged) { logged = true; logf("reactive mask active"); } }
     {
         D3D11_MAPPED_SUBRESOURCE m;
         if (SUCCEEDED(ctx->Map(cbParams, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
@@ -406,30 +459,33 @@ bool fsr_run(const FsrFrame &f) {
             p[0] = (float)rw; p[1] = (float)rh; p[2] = g_fsrCfg.cockpitDepth; p[3] = valid ? 1.f : 0.f;
             p[4] = 0.025f; p[5] = (float)g_fsrCfg.mv;
             { float a, b; fsr_jitter(a, b); p[6] = g_fsrCfg.jitter ? a : 0; p[7] = g_fsrCfg.jitter ? b : 0; }
+            p[8] = useReact ? 1.f : 0.f; p[9] = g_fsrCfg.reactiveScale; p[10] = p[11] = 0;
             ctx->Unmap(cbParams, 0);
         }
         // save CS state
         ID3D11ComputeShader *ocs = 0; ID3D11ClassInstance *oci[256]; UINT onci = 256; ctx->CSGetShader(&ocs, oci, &onci);
-        ID3D11ShaderResourceView *osrv = 0; ctx->CSGetShaderResources(0, 1, &osrv);
-        ID3D11UnorderedAccessView *ouav[2] = {}; ctx->CSGetUnorderedAccessViews(0, 2, ouav);
+        ID3D11ShaderResourceView *osrv[3] = {}; ctx->CSGetShaderResources(0, 3, osrv);
+        ID3D11UnorderedAccessView *ouav[3] = {}; ctx->CSGetUnorderedAccessViews(0, 3, ouav);
         ID3D11Buffer *ocb[3] = {}; ctx->CSGetConstantBuffers(0, 3, ocb);
 
         ID3D11Buffer *cbs[3] = {cbFrame[cbCur], cbFrame[prevIdx], cbParams};
-        ID3D11UnorderedAccessView *uavs[2] = {sDepth.uav, sMV.uav};
+        ID3D11UnorderedAccessView *uavs[3] = {sDepth.uav, sMV.uav, sReactive.uav};
+        ID3D11ShaderResourceView *srvs[3] = {dsrv, useReact ? hsrv : 0, useReact ? snapSrv : 0};
         g_o.CSSetShader(ctx, csPrep, 0, 0);
-        g_o.CSSetShaderResources(ctx, 0, 1, &dsrv);
-        g_o.CSSetUnorderedAccessViews(ctx, 0, 2, uavs, 0);
+        g_o.CSSetShaderResources(ctx, 0, 3, srvs);
+        g_o.CSSetUnorderedAccessViews(ctx, 0, 3, uavs, 0);
         ctx->CSSetConstantBuffers(0, 3, cbs);
         ctx->Dispatch((rw + 7) / 8, (rh + 7) / 8, 1);
         // restore
-        ID3D11UnorderedAccessView *nu[2] = {}; g_o.CSSetUnorderedAccessViews(ctx, 0, 2, nu, 0);
+        ID3D11UnorderedAccessView *nu[3] = {}; g_o.CSSetUnorderedAccessViews(ctx, 0, 3, nu, 0);
+        ID3D11ShaderResourceView *ns[3] = {}; g_o.CSSetShaderResources(ctx, 0, 3, ns);
         g_o.CSSetShader(ctx, ocs, onci ? oci : 0, onci);
-        g_o.CSSetShaderResources(ctx, 0, 1, &osrv);
-        UINT keep[2] = {(UINT)-1, (UINT)-1};
-        g_o.CSSetUnorderedAccessViews(ctx, 0, 2, ouav, keep);
+        g_o.CSSetShaderResources(ctx, 0, 3, osrv);
+        UINT keep[3] = {(UINT)-1, (UINT)-1, (UINT)-1};
+        g_o.CSSetUnorderedAccessViews(ctx, 0, 3, ouav, keep);
         ctx->CSSetConstantBuffers(0, 3, ocb);
         if (ocs) ocs->Release(); for (UINT i = 0; i < onci; i++) if (oci[i]) oci[i]->Release();
-        if (osrv) osrv->Release(); for (auto *u : ouav) if (u) u->Release(); for (auto *c : ocb) if (c) c->Release();
+        for (auto *v : osrv) if (v) v->Release(); for (auto *u : ouav) if (u) u->Release(); for (auto *c : ocb) if (c) c->Release();
     }
     camera_readback(ctx);
 
@@ -445,12 +501,13 @@ bool fsr_run(const FsrFrame &f) {
     }
     alloc12[ai]->Reset();
     cl12->Reset(alloc12[ai], 0);
-    D3D12_RESOURCE_BARRIER br[4];
+    D3D12_RESOURCE_BARRIER br[5];
+    barrier(sReactive.r12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, br[4]);
     barrier(sColor.r12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, br[0]);
     barrier(sDepth.r12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, br[1]);
     barrier(sMV.r12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, br[2]);
     barrier(sOut.r12, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, br[3]);
-    cl12->ResourceBarrier(4, br);
+    cl12->ResourceBarrier(5, br);
 
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
     float dtMs = lastQpc.QuadPart ? (float)((now.QuadPart - lastQpc.QuadPart) * 1000.0 / qpf.QuadPart) : 16.6f;
@@ -463,6 +520,7 @@ bool fsr_run(const FsrFrame &f) {
     dd.depth = ffxApiGetResourceDX12(sDepth.r12, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dd.motionVectors = ffxApiGetResourceDX12(sMV.r12, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dd.output = ffxApiGetResourceDX12(sOut.r12, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (useReact) dd.reactive = ffxApiGetResourceDX12(sReactive.r12, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     float sjx, sjy; fsr_jitter(sjx, sjy);
     dd.jitterOffset = {g_fsrCfg.jitter ? sjx : 0.f, g_fsrCfg.jitter ? sjy : 0.f};
     dd.motionVectorScale = {(float)rw, (float)rh};
@@ -483,7 +541,7 @@ bool fsr_run(const FsrFrame &f) {
         static int n; if (n++ < 5) logf("ffxDispatch rc=%u", rc);
     }
     for (auto &b : br) std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
-    cl12->ResourceBarrier(4, br);
+    cl12->ResourceBarrier(5, br);
     cl12->Close();
     q12->Wait(fence12, v11);
     ID3D12CommandList *lists[] = {cl12};
@@ -498,6 +556,7 @@ bool fsr_run(const FsrFrame &f) {
 
     if (frameNo == 1) logf("first FSR frame dispatched (rc=%u, depth=%s, mv valid=%d)", rc, dsrv ? "yes" : "NO", valid);
     resetNext = false;
+    snapValid = false;
     cbCur ^= 1; cbHave[cbCur] = false;
     g_bs.jx = dd.jitterOffset.x; g_bs.jy = dd.jitterOffset.y; g_bs.dtMs = dtMs;
     g_bs.depth = sDepth.r12; g_bs.mv = sMV.r12; g_bs.rw = rw; g_bs.rh = rh; g_bs.frameNo = frameNo;

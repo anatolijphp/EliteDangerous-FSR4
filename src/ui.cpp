@@ -723,9 +723,11 @@ bool ui_init(HWND gameWindow, ID3D11Device *dev, ID3D11DeviceContext *ctx) {
     g_dev = dev; g_dev->AddRef();
     g_ctx = ctx; g_ctx->AddRef();
 
-    // private pipeline-state block (ID3D11DeviceContext1::SwapDeviceContextState)
+    // NOTE: SwapDeviceContextState is deliberately NOT used: the D3D11 runtime rewrites the immediate context's
+    // vtable slots on every state swap, which removes the mod's CSSetShader/OM/RS hooks (FSR stops working).
+    // The fallback path (ImGui's own state backup + OM render targets) is used instead.
     ID3D11Device1 *dev1 = nullptr;
-    if (SUCCEEDED(dev->QueryInterface(__uuidof(ID3D11Device1), (void **)&dev1)) && dev1) {
+    if (false && SUCCEEDED(dev->QueryInterface(__uuidof(ID3D11Device1), (void **)&dev1)) && dev1) {
         if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void **)&g_ctx1)) && g_ctx1) {
             D3D_FEATURE_LEVEL fl = dev->GetFeatureLevel();
             UINT flags = (dev->GetCreationFlags() & D3D11_CREATE_DEVICE_SINGLETHREADED) ? D3D11_1_CREATE_DEVICE_CONTEXT_STATE_SINGLETHREADED : 0;

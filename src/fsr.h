@@ -16,6 +16,8 @@ struct FsrSettings {
     float sharpness = 0.f;       // FSR internal sharpening (game RCAS runs afterwards anyway)
     int debugView = 0;
     int version = 1;             // 1 = FSR 4 (ML), 2 = FSR 3.1
+    int reactive = 1;            // reactive mask from (final HDR - opaque snapshot)
+    float reactiveScale = 1.0f;  // mask strength
 };
 extern FsrSettings g_fsrCfg;
 
@@ -62,7 +64,9 @@ void fsr_request_reinit();         // re-create upscaler context (version change
 
 // edfsr.cpp
 bool mod_upscaler_active();
-void mod_hook_device(ID3D11Device *dev);   // hook a device/context (safe to call repeatedly)
+void mod_hook_device(ID3D11Device *dev);
+void mod_verify_hooks(ID3D11DeviceContext *ctx);  // re-patch rewritten vtable slots   // hook a device/context (safe to call repeatedly)
 void mod_set_upscaler_active(bool on);
 // fg.cpp
 void fg_on_dinput_created(void *pDirectInput8);
+void fsr_snapshot_opaque(ID3D11DeviceContext *ctx, ID3D11Texture2D *hdr);  // end of opaque pass (reactive mask)

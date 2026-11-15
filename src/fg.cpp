@@ -189,7 +189,9 @@ static void overlay(IDXGISwapChain *sc) {
     ID3D11Texture2D *bb = 0; sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void **)&bb);
     if (!bb) return;
     ID3D11Device *d11 = 0; bb->GetDevice(&d11);
+    mod_hook_device(d11);  // watchdog: re-hook if the runtime swapped the context vtable
     ID3D11DeviceContext *ctx = 0; d11->GetImmediateContext(&ctx);
+    mod_verify_hooks(ctx);
     if (!g_uiInit) { g_uiInit = true; if (!ui_init(g_realHwnd, d11, ctx)) logf("ui_init failed"); else logf("settings overlay ready (CTRL+F8)"); }
     D3D11_TEXTURE2D_DESC td; bb->GetDesc(&td);
     if (bb != g_bbRtvTex) {
@@ -218,6 +220,7 @@ static void overlay(IDXGISwapChain *sc) {
     g_ui.dirty = g_ui.saveRequested = false;
 
     if (g_bbRtv) ui_frame(g_bbRtv, td.Width, td.Height, g_ui);
+    mod_verify_hooks(ctx);  // SwapDeviceContextState in the overlay can rewrite context vtable slots
     {   // debug: EDFSR_UI_DUMP=<file.bmp> dumps the backbuffer (with overlay) at present #120
         static int n; char path[MAX_PATH];
         if (++n == 120 && GetEnvironmentVariableA("EDFSR_UI_DUMP", path, sizeof path)) {
