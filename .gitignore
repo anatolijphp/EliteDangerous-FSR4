@@ -1,0 +1,20 @@
+# RenderDoc captures of the game (multi-GB, contain game assets)
+captures/
+# Extracted game shader bytecode / disassembly (copyrighted game content)
+shaders/
+# Build output, AMD signed runtime DLLs (CI downloads them), logs
+build/
+bin/
+logs/
+# Binary / generated files
+*.rdc
+*.dxbc
+*.bmp
+*.png
+*.exe
+*.o
+*.bak
+tools/harness/out_*
+tools/harness/crop_*
+# Prebuilt helper proxy DLL (built from tools/rdproxy/dinput8.c)
+tools/rdproxy/*.dll

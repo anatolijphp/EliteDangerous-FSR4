@@ -1,0 +1,109 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed only for the release step on v* tags
+
+env:
+  LLVM_MINGW_TAG: "20261020"
+  LLVM_MINGW_NAME: llvm-mingw-20261020-ucrt-x86_64
+  FFX_TAG: v2.4.0
+  IMGUI_TAG: v1.91.8
+  RENDERDOC_TAG: v1.47
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool paths
+        run: |
+          D="$(cygpath -u "$RUNNER_TEMP")/deps"
+          echo "DEPS=$D" >> "$GITHUB_ENV"
+          echo "DEPS_WIN=$(cygpath -w "$D")" >> "$GITHUB_ENV"
+
+      - name: Cache dependencies
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPS_WIN }}
+          key: deps-${{ env.LLVM_MINGW_NAME }}-ffx-${{ env.FFX_TAG }}-imgui-${{ env.IMGUI_TAG }}-rdoc-${{ env.RENDERDOC_TAG }}-v1
+
+      - name: Download dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEPS" && cd "$DEPS"
+
+          # llvm-mingw (pinned release)
+          curl -sSLf -o llvm-mingw.zip \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW_TAG/$LLVM_MINGW_NAME.zip"
+          7z x -y -bso0 llvm-mingw.zip
+          rm llvm-mingw.zip
+
+          # FidelityFX SDK: headers + signed DX12 runtime DLLs only (sparse, shallow)
+          git clone --quiet --depth 1 --branch "$FFX_TAG" --filter=blob:none --sparse \
+            https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git ffx
+          git -C ffx sparse-checkout set --no-cone \
+            /Kits/FidelityFX/api/include/ \
+            /Kits/FidelityFX/upscalers/include/ \
+            /Kits/FidelityFX/framegeneration/include/ \
+            /Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll \
+            /Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll \
+            /Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll
+          rm -rf ffx/.git
+
+          # Dear ImGui sources
+          curl -sSLf -o imgui.tar.gz "https://github.com/ocornut/imgui/archive/refs/tags/$IMGUI_TAG.tar.gz"
+          mkdir imgui && tar -xzf imgui.tar.gz -C imgui --strip-components=1
+          rm imgui.tar.gz
+
+          # RenderDoc in-application API header
+          mkdir renderdoc
+          curl -sSLf -o renderdoc/renderdoc_app.h \
+            "https://raw.githubusercontent.com/baldurk/renderdoc/$RENDERDOC_TAG/renderdoc/api/app/renderdoc_app.h"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          LLVM_MINGW="$DEPS/$LLVM_MINGW_NAME" \
+          FFX_SDK="$DEPS/ffx" \
+          IMGUI_DIR="$DEPS/imgui" \
+          RENDERDOC_INC="$DEPS/renderdoc" \
+          sh build.sh
+
+      - name: Stage package
+        run: |
+          set -euo pipefail
+          mkdir -p dist/ed-fsr/bin
+          cp build/dinput8.dll edfsr.ini install.ps1 README.md dist/ed-fsr/
+          cp bin/*.dll dist/ed-fsr/bin/
+          ls -lR dist/ed-fsr
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ed-fsr
+          path: dist/ed-fsr/
+          if-no-files-found: error
+
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          Z="ed-fsr-$GITHUB_REF_NAME.zip"
+          (cd dist/ed-fsr && 7z a -tzip -bso0 "../$Z" .)
+          gh release create "$GITHUB_REF_NAME" "dist/$Z" --title "ED-FSR $GITHUB_REF_NAME" --generate-notes
