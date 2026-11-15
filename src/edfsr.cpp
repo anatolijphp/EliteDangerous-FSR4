@@ -60,7 +60,8 @@ static bool g_active = true;  // upscaler on (settings overlay / ini "upscaler")
 
 int g_qualityMode = QM_GAME;
 static const char *kQmKeys[QM_COUNT] = {"game", "ultra_quality", "quality", "balanced", "performance", "ultra_performance", "native"};
-static const float kQmScale[QM_COUNT] = {0.f, 1.f / 1.3f, 1.f / 1.5f, 1.f / 1.7f, 0.5f, 1.f / 3.f, 1.f};
+// native AA uses 0.999 so the game keeps its upscale pass (EASU) running, which is where FSR is injected
+static const float kQmScale[QM_COUNT] = {0.f, 1.f / 1.3f, 1.f / 1.5f, 1.f / 1.7f, 0.5f, 1.f / 3.f, 0.999f};
 const char *quality_mode_key(int m) { return (m >= 0 && m < QM_COUNT) ? kQmKeys[m] : "game"; }
 float quality_mode_scale(int m) { return (m > 0 && m < QM_COUNT) ? kQmScale[m] : 0.f; }
 
